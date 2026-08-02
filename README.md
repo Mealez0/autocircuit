@@ -1,5 +1,53 @@
 # AutoCircuit: Automated Discovery of Interpretable Reasoning Patterns in Large Language Models
 
+> **New MVP:** The maintained core is now a reproducible, UI-free foundation for
+> automated causal circuit discovery on Pythia-70M. Existing research directories are
+> retained as legacy/prototype work. The frozen research contract is in
+> [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md).
+
+## MVP Quick Start
+
+Python 3.11 is recommended (supported: 3.11–3.12). TransformerLens and Transformers are
+intentionally pinned to the locally validated `2.15.4` / `4.51.3` pair; do not upgrade to
+Transformers 5.x. The doctor reads installed package metadata and **does not download a model**.
+
+### Windows + NVIDIA GPU
+
+Create and activate a fresh environment, install the CUDA-enabled PyTorch wheel appropriate for
+your driver first, and then install this project without allowing pip to replace that working
+PyTorch build:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+# Keep an already-working CUDA torch, or install it from the selector at pytorch.org first.
+python -m pip install -e ".[dev]" --no-deps
+python -m pip install packaging transformer-lens==2.15.4 transformers==4.51.3 pytest ruff mypy
+python -m autocircuit.doctor
+pytest -q
+python -m autocircuit.smoke --model pythia-70m --device auto
+```
+
+`--no-deps` is deliberate: it preserves the CUDA-enabled PyTorch installation. Confirm that the
+doctor selects `cuda` before running the smoke test. The smoke command downloads Pythia-70M on its
+first run and therefore requires network access and Hugging Face cache space.
+
+### Linux / Codex / CPU
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
+python -m autocircuit.doctor
+pytest -q
+ruff check src tests
+```
+
+The unit tests never load a model or access the network. To opt into the separate CPU integration
+check, run `python -m autocircuit.smoke --model pythia-70m --device cpu` (expect it to be slower).
+
 Project no.24 in [AI Safety Camp 2025](https://www.aisafety.camp/)
 
 ## Summary

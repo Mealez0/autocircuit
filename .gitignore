@@ -221,3 +221,10 @@ docs/presentation.html
 docs/paper.pdf
 docs/supplementary.html
 docs/supplementary.pdf
+
+# AutoCircuit MVP generated outputs and local model caches
+outputs/
+.huggingface/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

@@ -1,0 +1,8 @@
+[experiment]
+model = "pythia-70m"
+seed = 42
+
+[splits]
+discovery = 256
+validation = 128
+test = 128
