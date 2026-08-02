@@ -20,8 +20,11 @@ class MVPConfig:
 def load_config(path: str | Path) -> MVPConfig:
     with Path(path).open("rb") as stream:
         raw = tomllib.load(stream)
-    experiment = raw["experiment"]
-    splits = raw["splits"]
+    try:
+        experiment = raw["experiment"]
+        splits = raw["splits"]
+    except KeyError as exc:
+        raise ValueError(f"missing configuration section: {exc.args[0]}") from exc
     config = MVPConfig(
         model=str(experiment["model"]),
         seed=int(experiment["seed"]),
@@ -31,4 +34,6 @@ def load_config(path: str | Path) -> MVPConfig:
     )
     if min(config.discovery_examples, config.validation_examples, config.test_examples) <= 0:
         raise ValueError("all split sizes must be positive")
+    if not config.model or config.seed < 0:
+        raise ValueError("model must be non-empty and seed must be non-negative")
     return config
