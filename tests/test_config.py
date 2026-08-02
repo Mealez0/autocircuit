@@ -25,3 +25,10 @@ def test_non_positive_split_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="split sizes"):
         load_config(path)
+
+
+def test_malformed_config_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "bad.toml"
+    path.write_text('[experiment]\nmodel = "pythia-70m"\nseed = 1\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="missing configuration section"):
+        load_config(path)

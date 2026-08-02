@@ -39,5 +39,5 @@ python_version = "3.11"
 strict = true
 packages = ["autocircuit"]
 [[tool.mypy.overrides]]
-module = ["torch", "transformer_lens"]
+module = ["torch", "transformer_lens", "transformers"]
 ignore_missing_imports = true
