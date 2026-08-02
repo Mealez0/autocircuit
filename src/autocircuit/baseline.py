@@ -10,9 +10,9 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from autocircuit.datasets.associative_recall import read_jsonl
+from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
 from autocircuit.runtime import select_device
 
 
@@ -25,6 +25,107 @@ class BaselineMetrics:
     clean_corrupt_contrast: float
     example_count: int
     failed_count: int
+
+
+@dataclass(frozen=True)
+class ExampleResult:
+    example_id: str
+    family_id: str
+    split: str
+    template_id: str
+    clean_prompt: str
+    corrupt_prompt: str
+    target_text: str
+    distractor_text: str
+    target_token_id: int
+    distractor_token_id: int
+    fact_count: int
+    query_entity: str
+    query_fact_index: int
+    normalized_query_position: str
+    prompt_token_length: int
+    clean_target_logit: float | None
+    clean_distractor_logit: float | None
+    clean_logit_difference: float | None
+    corrupt_target_logit: float | None
+    corrupt_distractor_logit: float | None
+    corrupt_logit_difference: float | None
+    clean_correct: bool | None
+    corrupt_correct: bool | None
+    clean_corrupt_recovery_span: float | None
+    processing_status: str
+    error: str | None
+
+
+class LogitEvaluator(Protocol):
+    def logits(self, prompts: list[str]) -> Any: ...
+
+
+def successful_difference(value: float | None) -> float:
+    if value is None:
+        raise ValueError("successful record is missing a logit difference")
+    return value
+
+
+def make_example_result(
+    example: ExamplePair,
+    clean_target: float,
+    clean_distractor: float,
+    corrupt_target: float,
+    corrupt_distractor: float,
+) -> ExampleResult:
+    clean_ld = clean_target - clean_distractor
+    corrupt_ld = corrupt_target - corrupt_distractor
+    metadata = example.metadata
+    assignments = metadata.get("assignments", [])
+    query_index = metadata.get("query_fact_index")
+    if query_index is None:
+        query_index = next(
+            (i for i, pair in enumerate(assignments) if pair[0] == metadata["query_entity"]), 0
+        )
+    fact_count = int(metadata["fact_count"])
+    normalized = metadata.get("normalized_query_position")
+    if normalized is None:
+        normalized = (
+            "first" if query_index == 0 else "last" if query_index == fact_count - 1 else "interior"
+        )
+    return ExampleResult(
+        example.example_id,
+        example.family_id,
+        example.split,
+        example.template_id,
+        example.clean_prompt,
+        example.corrupt_prompt,
+        example.target_text,
+        example.distractor_text,
+        example.target_token_id,
+        example.distractor_token_id,
+        fact_count,
+        str(metadata["query_entity"]),
+        int(query_index),
+        str(normalized),
+        int(metadata["prompt_token_length"]),
+        clean_target,
+        clean_distractor,
+        clean_ld,
+        corrupt_target,
+        corrupt_distractor,
+        corrupt_ld,
+        clean_ld > 0,
+        corrupt_ld < 0,
+        clean_ld - corrupt_ld,
+        "ok",
+        None,
+    )
+
+
+def write_example_results(path: Path, records: Sequence[ExampleResult]) -> str:
+    payload = "".join(
+        json.dumps(asdict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        for record in records
+    ).encode("utf-8")
+    path.write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
 
 
 def metrics_from_differences(
@@ -75,6 +176,7 @@ def evaluate(
     examples = read_jsonl(dataset / f"{split}.jsonl")
     clean_differences: list[float] = []
     corrupt_differences: list[float] = []
+    records: list[ExampleResult] = []
     failed = 0
     for start in range(0, len(examples), batch_size):
         batch = examples[start : start + batch_size]
@@ -91,11 +193,17 @@ def evaluate(
                 )[:, -1]
                 for row, item in enumerate(group):
                     target, distractor = item.target_token_id, item.distractor_token_id
-                    clean_differences.append(
-                        float(clean_logits[row, target] - clean_logits[row, distractor])
+                    record = make_example_result(
+                        item,
+                        float(clean_logits[row, target]),
+                        float(clean_logits[row, distractor]),
+                        float(corrupt_logits[row, target]),
+                        float(corrupt_logits[row, distractor]),
                     )
+                    records.append(record)
+                    clean_differences.append(successful_difference(record.clean_logit_difference))
                     corrupt_differences.append(
-                        float(corrupt_logits[row, target] - corrupt_logits[row, distractor])
+                        successful_difference(record.corrupt_logit_difference)
                     )
             except (RuntimeError, ValueError):
                 failed += len(group)
@@ -106,6 +214,7 @@ def evaluate(
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{split}-{seed}"
     output = output_root / run_id
     output.mkdir(parents=True, exist_ok=False)
+    write_example_results(output / "examples.jsonl", records)
     result = {
         "baseline": "PASS" if passed else "FAIL",
         "split": split,

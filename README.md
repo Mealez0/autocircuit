@@ -48,6 +48,32 @@ ruff check src tests
 The unit tests never load a model or access the network. To opt into the separate CPU integration
 check, run `python -m autocircuit.smoke --model pythia-70m --device cpu` (expect it to be slower).
 
+## Discovery diagnosis and dataset-v2 search
+
+On the target Windows CUDA machine, the complete behavioral research stage is one command:
+
+```powershell
+python -m autocircuit.pipeline discovery --device cuda
+```
+
+The command regenerates **discovery only**, evaluates Pythia-70M, records every example, produces
+deterministic grouped/bootstrap diagnostics, and evaluates seven preregistered population-level
+format candidates. It never opens, loads, scores, or summarizes `validation.jsonl` or `test.jsonl`.
+This intentional firewall means the chosen candidate remains discovery-selected and requires future
+held-out evaluation.
+
+Software success and scientific eligibility are distinct. A baseline or candidate may fail the
+immutable gate (clean accuracy >= 0.80 and mean clean logit difference >= 1.0) while the command
+exits successfully. Eligible candidates are ordered by clean accuracy, mean clean LD, clean/corrupt
+contrast, then lexical candidate ID. If none passes, status is `NO_ELIGIBLE_CONFIGURATION`; the
+pipeline stops without causal scanning. Activation patching remains the next stage only after
+behavioral eligibility.
+
+Outputs live at `artifacts/discovery_pipeline/<run-id>/`: `run_manifest.json`, v1 baseline records
+and diagnostic JSON/Markdown under `v1/`, complete per-candidate datasets/results under
+`candidates/`, comparison JSON/Markdown, optional `selected_v2.json`, and `final_status.json`.
+Generated artifacts and model caches are not source controlled.
+
 Project no.24 in [AI Safety Camp 2025](https://www.aisafety.camp/)
 
 ## Summary
