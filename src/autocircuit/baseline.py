@@ -119,6 +119,54 @@ def make_example_result(
     )
 
 
+def make_failed_result(example: ExamplePair, error: BaseException | str) -> ExampleResult:
+    """Construct a complete identity-preserving record for a recoverable scoring failure."""
+    metadata = example.metadata
+    assignments = metadata.get("assignments", [])
+    query_index = metadata.get("query_fact_index")
+    if query_index is None:
+        query_index = next(
+            (i for i, pair in enumerate(assignments) if pair[0] == metadata["query_entity"]), 0
+        )
+    fact_count = int(metadata["fact_count"])
+    normalized = metadata.get("normalized_query_position") or (
+        "first" if query_index == 0 else "last" if query_index == fact_count - 1 else "interior"
+    )
+    if isinstance(error, BaseException):
+        detail = " ".join(str(error).split())[:160]
+        message = type(error).__name__ + (f": {detail}" if detail else "")
+    else:
+        message = " ".join(error.split())[:160]
+    return ExampleResult(
+        example.example_id,
+        example.family_id,
+        example.split,
+        example.template_id,
+        example.clean_prompt,
+        example.corrupt_prompt,
+        example.target_text,
+        example.distractor_text,
+        example.target_token_id,
+        example.distractor_token_id,
+        fact_count,
+        str(metadata["query_entity"]),
+        int(query_index),
+        str(normalized),
+        int(metadata["prompt_token_length"]),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "error",
+        message,
+    )
+
+
 def write_example_results(path: Path, records: Sequence[ExampleResult]) -> str:
     payload = "".join(
         json.dumps(asdict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
@@ -176,7 +224,7 @@ def evaluate(
     examples = read_jsonl(dataset / f"{split}.jsonl")
     clean_differences: list[float] = []
     corrupt_differences: list[float] = []
-    records: list[ExampleResult] = []
+    records_by_id: dict[str, ExampleResult] = {}
     failed = 0
     for start in range(0, len(examples), batch_size):
         batch = examples[start : start + batch_size]
@@ -200,13 +248,16 @@ def evaluate(
                         float(corrupt_logits[row, target]),
                         float(corrupt_logits[row, distractor]),
                     )
-                    records.append(record)
+                    records_by_id[item.example_id] = record
                     clean_differences.append(successful_difference(record.clean_logit_difference))
                     corrupt_differences.append(
                         successful_difference(record.corrupt_logit_difference)
                     )
-            except (RuntimeError, ValueError):
+            except (RuntimeError, ValueError) as exc:
                 failed += len(group)
+                for item in group:
+                    records_by_id[item.example_id] = make_failed_result(item, exc)
+    records = [records_by_id[item.example_id] for item in examples]
     metrics = metrics_from_differences(clean_differences, corrupt_differences, failed_count=failed)
     manifest_path = dataset / "manifest.json"
     manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))

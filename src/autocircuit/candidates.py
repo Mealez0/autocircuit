@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, cast
 
 from autocircuit.baseline import BaselineMetrics, baseline_passes
-from autocircuit.datasets.associative_recall import GENERATOR_VERSION, GenerationParameters
+from autocircuit.datasets.associative_recall import V2_GENERATOR_VERSION, GenerationParameters
 
 SELECTION_RULE = (
     "eligible (accuracy>=0.80 and mean clean LD>=1.0), then descending accuracy, "
@@ -20,7 +21,7 @@ class Candidate:
     candidate_id: str
     rationale: str
     parameters: GenerationParameters
-    generator_version: str = GENERATOR_VERSION
+    generator_version: str = V2_GENERATOR_VERSION
 
 
 def candidate_registry(strongest_template: str) -> tuple[Candidate, ...]:
@@ -73,11 +74,23 @@ def strongest_template(diagnostics: dict[str, Any]) -> str:
     return str(winner["value"]).removesuffix("-v1")
 
 
-def select_candidate(results: dict[str, BaselineMetrics]) -> str | None:
+def candidate_is_eligible(metrics: BaselineMetrics, generated_count: int) -> bool:
+    return (
+        baseline_passes(metrics)
+        and metrics.failed_count == 0
+        and metrics.example_count + metrics.failed_count == generated_count
+    )
+
+
+def select_candidate(
+    results: dict[str, BaselineMetrics], generated_counts: dict[str, int] | None = None
+) -> str | None:
     eligible = [
         (candidate_id, metrics)
         for candidate_id, metrics in results.items()
-        if baseline_passes(metrics)
+        if candidate_is_eligible(
+            metrics, generated_counts[candidate_id] if generated_counts else metrics.example_count
+        )
     ]
     if not eligible:
         return None
@@ -93,7 +106,13 @@ def select_candidate(results: dict[str, BaselineMetrics]) -> str | None:
 
 
 def frozen_config(
-    candidate: Candidate, metrics: BaselineMetrics, model: str, revision: str
+    candidate: Candidate,
+    metrics: BaselineMetrics,
+    model: str,
+    tokenizer: str,
+    requested_revision: str,
+    resolved_revision: str | None,
+    base_seed: int,
 ) -> dict[str, Any]:
     return {
         "schema_version": 2,
@@ -103,7 +122,51 @@ def frozen_config(
         "generator_version": candidate.generator_version,
         "discovery_selection_metrics": asdict(metrics),
         "seed_namespace": SEED_NAMESPACE,
+        "base_seed": base_seed,
         "model": model,
-        "revision": revision,
+        "tokenizer": tokenizer,
+        "requested_revision": requested_revision,
+        "resolved_revision": resolved_revision,
+        "frozen_thresholds": {"clean_accuracy": 0.80, "clean_mean_logit_difference": 1.0},
         "selection_rule": SELECTION_RULE,
     }
+
+
+def frozen_toml(value: dict[str, Any]) -> bytes:
+    """Serialize the declarative v2 contract without timestamps or machine paths."""
+
+    def quote(item: object) -> str:
+        return json.dumps(item, ensure_ascii=False)
+
+    lines = [
+        f"schema_version = {value['schema_version']}",
+        f"status = {quote(value['status'])}",
+        f"selected_candidate_id = {quote(value['selected_candidate_id'])}",
+        f"generator_version = {quote(value['generator_version'])}",
+        f"base_seed = {value['base_seed']}",
+        f"seed_namespace = {quote(value['seed_namespace'])}",
+        f"model = {quote(value['model'])}",
+        f"tokenizer = {quote(value['tokenizer'])}",
+        f"requested_revision = {quote(value['requested_revision'])}",
+        f"resolved_revision = {quote(value['resolved_revision'] or '')}",
+        f"selection_rule = {quote(value['selection_rule'])}",
+        "",
+        "[generation]",
+    ]
+    parameters = cast(dict[str, object], value["parameters"])
+    for key in sorted(parameters):
+        item = parameters[key]
+        rendered = (
+            "[" + ", ".join(quote(part) for part in item) + "]"
+            if isinstance(item, list | tuple)
+            else quote(item)
+            if isinstance(item, str)
+            else str(item)
+        )
+        lines.append(f"{key} = {rendered}")
+    for section in ("frozen_thresholds", "discovery_selection_metrics"):
+        lines += ["", f"[{section}]"]
+        section_values = cast(dict[str, object], value[section])
+        for key, item in sorted(section_values.items()):
+            lines.append(f"{key} = {str(item).lower() if isinstance(item, bool) else item}")
+    return ("\n".join(lines) + "\n").encode("utf-8")

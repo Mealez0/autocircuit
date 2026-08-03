@@ -137,20 +137,55 @@ def write_reports(report: dict[str, Any], json_path: Path, markdown_path: Path) 
         lines += [
             f"## {dimension}",
             "",
-            "| Value | n | Clean accuracy | Mean clean LD | Power |",
-            "|---|---:|---:|---:|---|",
+            "| Value | n | Clean acc. (95% CI) | Corrupt acc. | "
+            "Clean LD (95% CI) | Corrupt LD | Contrast | Power |",
+            "|---|---:|---:|---:|---:|---:|---:|---|",
         ]
         lines += [
-            "| {value} | {count} | {accuracy:.4f} | {ld:.4f} | {power} |".format(
+            "| {value} | {count} | {accuracy:.4f} ({accuracy_ci}) | {corrupt_accuracy:.4f} | "
+            "{ld:.4f} ({ld_ci}) | {corrupt_ld:.4f} | {contrast:.4f} | {power} |".format(
                 value=g["value"],
                 count=g["count"],
                 accuracy=g["clean_accuracy"],
+                accuracy_ci="–".join(f"{x:.4f}" for x in g["clean_accuracy_bootstrap_95_ci"]),
+                corrupt_accuracy=g["corrupt_accuracy"],
                 ld=g["mean_clean_ld"],
+                ld_ci="–".join(f"{x:.4f}" for x in g["clean_ld_mean_bootstrap_95_ci"]),
+                corrupt_ld=g["mean_corrupt_ld"],
+                contrast=g["mean_clean_corrupt_contrast"],
                 power="underpowered" if g["underpowered"] else "adequate",
             )
             for g in groups
         ]
         lines.append("")
+    labels = {
+        "lowest_clean_ld": "25 lowest clean-LD examples",
+        "highest_clean_ld": "25 highest clean-LD examples",
+        "smallest_contrast": "25 smallest clean-corrupt contrasts",
+        "largest_contrast": "25 largest clean-corrupt contrasts",
+    }
+    for key, label in labels.items():
+        lines += [f"## {label}", ""]
+        for record in report["examples"][key]:
+            lines += [
+                f"### `{record['example_id']}`",
+                "",
+                f"- Template: `{record['template_id']}`; facts: {record['fact_count']}; "
+                f"query: `{record['query_entity']}` at {record['normalized_query_position']} "
+                f"(index {record['query_fact_index']}); tokens: {record['prompt_token_length']}",
+                f"- Target/distractor: `{record['target_text']}` / `{record['distractor_text']}`; "
+                f"clean LD: {record['clean_logit_difference']}; contrast: "
+                f"{record['clean_corrupt_recovery_span']}",
+                "- Clean prompt:",
+                "```text",
+                record["clean_prompt"],
+                "```",
+                "- Corrupt prompt:",
+                "```text",
+                record["corrupt_prompt"],
+                "```",
+                "",
+            ]
     markdown_path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
 
 

@@ -20,6 +20,7 @@ from autocircuit.baseline import (
     BaselineMetrics,
     ExampleResult,
     make_example_result,
+    make_failed_result,
     metrics_from_differences,
     successful_difference,
     write_example_results,
@@ -27,14 +28,21 @@ from autocircuit.baseline import (
 from autocircuit.candidates import (
     SEED_NAMESPACE,
     SELECTION_RULE,
+    candidate_is_eligible,
     candidate_registry,
     frozen_config,
+    frozen_toml,
     select_candidate,
     strongest_template,
 )
 from autocircuit.config import load_config
-from autocircuit.datasets.associative_recall import ExamplePair, generate_split, write_jsonl
-from autocircuit.diagnostics import build_diagnostics, write_reports
+from autocircuit.datasets.associative_recall import (
+    ExamplePair,
+    generate_split,
+    read_jsonl,
+    write_jsonl,
+)
+from autocircuit.diagnostics import build_diagnostics, read_results, write_reports
 from autocircuit.runtime import select_device
 
 
@@ -44,6 +52,9 @@ class Adapter(Protocol):
     revision: str
     device: str
     dtype: str
+    resolved_revision: str | None
+    revision_resolution_error: str | None
+    tokenizer_id: str
 
     def score(self, examples: list[ExamplePair], batch_size: int) -> list[ExampleResult]: ...
 
@@ -58,25 +69,50 @@ class PythiaAdapter:
         self.revision = revision
         self.model = HookedTransformer.from_pretrained(model, device=self.device, revision=revision)
         self.tokenizer = self.model.tokenizer
+        self.tokenizer_id = str(getattr(self.tokenizer, "name_or_path", self.model_id))
         self.dtype = str(self.model.cfg.dtype)
+        resolved = getattr(getattr(self.model, "cfg", None), "_commit_hash", None)
+        resolved = resolved or getattr(self.tokenizer, "init_kwargs", {}).get("_commit_hash")
+        self.resolved_revision = str(resolved) if resolved else None
+        self.revision_resolution_error = (
+            None if resolved else "commit SHA unavailable from loaded model"
+        )
 
     def score(self, examples: list[ExamplePair], batch_size: int) -> list[ExampleResult]:
-        records: list[ExampleResult] = []
-        for start in range(0, len(examples), batch_size):
-            batch = examples[start : start + batch_size]
-            for item in batch:
-                clean = self.model(item.clean_prompt, return_type="logits")[0, -1]
-                corrupt = self.model(item.corrupt_prompt, return_type="logits")[0, -1]
-                records.append(
-                    make_example_result(
-                        item,
-                        float(clean[item.target_token_id]),
-                        float(clean[item.distractor_token_id]),
-                        float(corrupt[item.target_token_id]),
-                        float(corrupt[item.distractor_token_id]),
-                    )
-                )
-        return records
+        import torch
+
+        indexed = list(enumerate(examples))
+        buckets: dict[int, list[tuple[int, ExamplePair]]] = {}
+        for entry in indexed:
+            buckets.setdefault(int(entry[1].metadata["prompt_token_length"]), []).append(entry)
+        records: list[ExampleResult | None] = [None] * len(examples)
+        with torch.inference_mode():
+            for length in sorted(buckets):
+                group = buckets[length]
+                for start in range(0, len(group), batch_size):
+                    chunk = group[start : start + batch_size]
+                    items = [item for _, item in chunk]
+                    try:
+                        clean = self.model(
+                            [item.clean_prompt for item in items], return_type="logits"
+                        )[:, -1]
+                        corrupt = self.model(
+                            [item.corrupt_prompt for item in items], return_type="logits"
+                        )[:, -1]
+                        for row, (position, item) in enumerate(chunk):
+                            records[position] = make_example_result(
+                                item,
+                                float(clean[row, item.target_token_id]),
+                                float(clean[row, item.distractor_token_id]),
+                                float(corrupt[row, item.target_token_id]),
+                                float(corrupt[row, item.distractor_token_id]),
+                            )
+                    except (RuntimeError, ValueError) as exc:
+                        for position, item in chunk:
+                            records[position] = make_failed_result(item, exc)
+        if any(record is None for record in records):
+            raise RuntimeError("internal scoring error: missing result record")
+        return [record for record in records if record is not None]
 
 
 def sha256(path: Path) -> str:
@@ -90,6 +126,28 @@ def verify_resume(path: Path, expected_hash: str) -> None:
 
 def _json(path: Path, value: Any) -> None:
     path.write_bytes((json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _fingerprint(args: argparse.Namespace, config_hash: str) -> str:
+    value = {
+        "model": args.model,
+        "revision": args.revision,
+        "device": args.device,
+        "batch_size": args.batch_size,
+        "seed": args.seed,
+        "config_hash": config_hash,
+    }
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _checkpoint(root: Path, state: dict[str, Any], path: Path) -> None:
+    state["artifact_hashes"][str(path.relative_to(root)).replace("\\", "/")] = sha256(path)
+    _json(root / "run_manifest.json", state)
+
+
+def _validate_checkpoints(root: Path, state: dict[str, Any]) -> None:
+    for relative, digest in state.get("artifact_hashes", {}).items():
+        verify_resume(root / relative, str(digest))
 
 
 def _metrics(records: list[ExampleResult]) -> BaselineMetrics:
@@ -121,6 +179,8 @@ def run_discovery(
     if args.model != "pythia-70m":
         raise ValueError("Pythia-70M is the only supported MVP model")
     config = load_config(Path("configs/mvp.toml"))
+    config_hash = sha256(Path("configs/mvp.toml"))
+    fingerprint = _fingerprint(args, config_hash)
     run_id = f"seed-{args.seed}-{args.revision.replace('/', '_')}"
     root = args.output / run_id
     if root.exists() and not (args.resume or args.force):
@@ -130,43 +190,77 @@ def run_discovery(
         if not manifest_path.is_file():
             raise RuntimeError("resume requested but run manifest is missing")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for candidate_id, digest in manifest["dataset_hashes"].items():
-            dataset_path = (
-                root / "v1" / "dataset" / "discovery.jsonl"
-                if candidate_id == "v1"
-                else root / "candidates" / candidate_id / "dataset" / "discovery.jsonl"
-            )
-            verify_resume(dataset_path, str(digest))
-        verify_resume(root / "v1" / "examples.jsonl", manifest["record_hashes"]["v1"])
-        final: dict[str, Any] = json.loads((root / "final_status.json").read_text(encoding="utf-8"))
-        print(f"Discovery pipeline resumed: {final['status']}")
-        print(f"Artifacts: {root}")
-        return final
+        if manifest.get("input_fingerprint") != fingerprint:
+            raise RuntimeError("resume inputs do not match the recorded command/config/model")
+        _validate_checkpoints(root, manifest)
+        if manifest.get("complete") is True:
+            final_path = root / "final_status.json"
+            if "final_status.json" not in manifest.get("artifact_hashes", {}):
+                raise RuntimeError("completed resume has no hashed final status")
+            final: dict[str, Any] = json.loads(final_path.read_text(encoding="utf-8"))
+            print(f"Discovery pipeline resumed: {final['status']}")
+            print(f"Artifacts: {root}")
+            return final
+        state = manifest
+    else:
+        state = {
+            "schema_version": 2,
+            "input_fingerprint": fingerprint,
+            "artifact_hashes": {},
+            "complete": False,
+        }
     adapter = adapter_factory(args.model, args.revision, args.device)
     if args.force and root.exists():
         import shutil
 
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
+    _json(root / "run_manifest.json", state)
 
     v1_dir = root / "v1"
     v1_dataset = v1_dir / "dataset"
     v1_dataset.mkdir(parents=True, exist_ok=True)
-    v1_examples, v1_rejections = generate_split(
-        "discovery", config.discovery_examples, args.seed, adapter.tokenizer
-    )
-    dataset_hash = write_jsonl(v1_dataset / "discovery.jsonl", v1_examples)
-    v1_records = adapter.score(v1_examples, args.batch_size)
-    records_hash = write_example_results(v1_dir / "examples.jsonl", v1_records)
+    v1_dataset_path = v1_dataset / "discovery.jsonl"
+    if "v1/dataset/discovery.jsonl" in state["artifact_hashes"]:
+        v1_examples = read_jsonl(v1_dataset_path)
+        v1_rejections: dict[str, int] = state.get("v1_rejections", {})
+    else:
+        v1_examples, v1_rejections = generate_split(
+            "discovery", config.discovery_examples, args.seed, adapter.tokenizer
+        )
+        write_jsonl(v1_dataset_path, v1_examples)
+        state["v1_rejections"] = v1_rejections
+        _checkpoint(root, state, v1_dataset_path)
+    dataset_hash = sha256(v1_dataset_path)
+    v1_records_path = v1_dir / "examples.jsonl"
+    if "v1/examples.jsonl" in state["artifact_hashes"]:
+        v1_records = read_results(v1_records_path)
+    else:
+        v1_records = adapter.score(v1_examples, args.batch_size)
+        write_example_results(v1_records_path, v1_records)
+        _checkpoint(root, state, v1_records_path)
+    records_hash = sha256(v1_records_path)
     v1_metrics = _metrics(v1_records)
+    v1_baseline_path = v1_dir / "baseline_results.json"
     _json(
-        v1_dir / "baseline_results.json",
+        v1_baseline_path,
         {"metrics": asdict(v1_metrics), "rejections": v1_rejections},
     )
+    _checkpoint(root, state, v1_baseline_path)
     diagnostics = build_diagnostics(v1_records)
     write_reports(diagnostics, v1_dir / "diagnostics.json", v1_dir / "diagnostics.md")
+    _checkpoint(root, state, v1_dir / "diagnostics.json")
+    _checkpoint(root, state, v1_dir / "diagnostics.md")
 
     registry = candidate_registry(strongest_template(diagnostics))
+    registry_payload = json.dumps([asdict(item) for item in registry], sort_keys=True)
+    registry_hash = hashlib.sha256(registry_payload.encode()).hexdigest()
+    if state.get("candidate_registry_hash", registry_hash) != registry_hash:
+        raise RuntimeError("candidate registry changed since the interrupted run")
+    state["candidate_registry_hash"] = registry_hash
+    state["candidate_seed_material"] = {
+        item.candidate_id: SEED_NAMESPACE + ":" + item.candidate_id for item in registry
+    }
     candidate_metrics: dict[str, BaselineMetrics] = {}
     comparison: list[dict[str, Any]] = []
     dataset_hashes = {"v1": dataset_hash}
@@ -174,30 +268,50 @@ def run_discovery(
         candidate_dir = root / "candidates" / candidate.candidate_id
         dataset_dir = candidate_dir / "dataset"
         dataset_dir.mkdir(parents=True, exist_ok=True)
-        examples, rejections = generate_split(
-            "discovery",
-            config.discovery_examples,
-            args.seed,
-            adapter.tokenizer,
-            parameters=candidate.parameters,
-            seed_namespace=SEED_NAMESPACE + ":" + candidate.candidate_id,
-        )
-        digest = write_jsonl(dataset_dir / "discovery.jsonl", examples)
+        dataset_path = dataset_dir / "discovery.jsonl"
+        dataset_key = f"candidates/{candidate.candidate_id}/dataset/discovery.jsonl"
+        if dataset_key in state["artifact_hashes"]:
+            examples = read_jsonl(dataset_path)
+            rejections = state.get("candidate_rejections", {}).get(candidate.candidate_id, {})
+        else:
+            examples, rejections = generate_split(
+                "discovery",
+                config.discovery_examples,
+                args.seed,
+                adapter.tokenizer,
+                parameters=candidate.parameters,
+                seed_namespace=SEED_NAMESPACE + ":" + candidate.candidate_id,
+            )
+            write_jsonl(dataset_path, examples)
+            state.setdefault("candidate_rejections", {})[candidate.candidate_id] = rejections
+            _checkpoint(root, state, dataset_path)
+        digest = sha256(dataset_path)
         dataset_hashes[candidate.candidate_id] = digest
-        records = adapter.score(examples, args.batch_size)
-        write_example_results(candidate_dir / "examples.jsonl", records)
+        candidate_records_path = candidate_dir / "examples.jsonl"
+        records_key = f"candidates/{candidate.candidate_id}/examples.jsonl"
+        if records_key in state["artifact_hashes"]:
+            records = read_results(candidate_records_path)
+        else:
+            records = adapter.score(examples, args.batch_size)
+            write_example_results(candidate_records_path, records)
+            _checkpoint(root, state, candidate_records_path)
         metrics = _metrics(records)
         candidate_metrics[candidate.candidate_id] = metrics
         summary = {
             "candidate": asdict(candidate),
             "metrics": asdict(metrics),
-            "eligible": metrics.clean_accuracy >= 0.80
-            and metrics.clean_mean_logit_difference >= 1.0,
+            "eligible": candidate_is_eligible(metrics, len(examples)),
+            "expected_example_count": len(examples),
+            "processed_example_count": metrics.example_count + metrics.failed_count,
             "pre_model_rejections": rejections,
         }
         comparison.append(summary)
-        _json(candidate_dir / "baseline_results.json", summary)
-    selected_id = select_candidate(candidate_metrics)
+        candidate_baseline_path = candidate_dir / "baseline_results.json"
+        _json(candidate_baseline_path, summary)
+        _checkpoint(root, state, candidate_baseline_path)
+    selected_id = select_candidate(
+        candidate_metrics, {item.candidate_id: config.discovery_examples for item in registry}
+    )
     status = "SELECTED_REQUIRES_HELD_OUT_VALIDATION" if selected_id else "NO_ELIGIBLE_CONFIGURATION"
     comparison_document = {
         "frozen_thresholds": {"clean_accuracy": 0.80, "clean_mean_logit_difference": 1.0},
@@ -206,6 +320,7 @@ def run_discovery(
         "selected_candidate_id": selected_id,
     }
     _json(root / "candidate_comparison.json", comparison_document)
+    _checkpoint(root, state, root / "candidate_comparison.json")
     lines = [
         "# Candidate comparison",
         "",
@@ -226,12 +341,29 @@ def run_discovery(
             )
         )
     (root / "candidate_comparison.md").write_bytes(("\n".join(lines) + "\n").encode())
+    _checkpoint(root, state, root / "candidate_comparison.md")
     if selected_id:
         candidate = next(item for item in registry if item.candidate_id == selected_id)
+        selected = frozen_config(
+            candidate,
+            candidate_metrics[selected_id],
+            args.model,
+            adapter.tokenizer_id,
+            args.revision,
+            adapter.resolved_revision,
+            args.seed,
+        )
         _json(
             root / "selected_v2.json",
-            frozen_config(candidate, candidate_metrics[selected_id], args.model, args.revision),
+            selected,
         )
+        _checkpoint(root, state, root / "selected_v2.json")
+        frozen_path = Path("configs/mvp_v2.toml")
+        payload = frozen_toml(selected)
+        if frozen_path.exists() and not args.force:
+            raise RuntimeError("configs/mvp_v2.toml exists; use --force to overwrite it")
+        frozen_path.write_bytes(payload)
+        state["frozen_v2_config_hash"] = hashlib.sha256(payload).hexdigest()
     final = {
         "status": status,
         "software_success": True,
@@ -240,29 +372,51 @@ def run_discovery(
         "held_out_splits_opened": False,
     }
     _json(root / "final_status.json", final)
-    manifest = {
+    _checkpoint(root, state, root / "final_status.json")
+    import torch
+
+    cuda_available = bool(torch.cuda.is_available())
+    cuda_device_name = torch.cuda.get_device_name() if cuda_available else None
+    manifest = state | {
         "git_commit": _git_commit(),
         "package_version": __version__,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "pytorch_version": _version("torch"),
-        "cuda_available": adapter.device == "cuda",
-        "cuda_device_name": None,
+        "cuda_available": cuda_available,
+        "cuda_device_name": cuda_device_name,
         "transformer_lens_version": _version("transformer-lens"),
         "transformers_version": _version("transformers"),
         "model_id": adapter.model_id,
+        "tokenizer_id": adapter.tokenizer_id,
         "requested_revision": args.revision,
-        "resolved_revision": adapter.revision,
+        "resolved_revision": adapter.resolved_revision,
+        "revision_resolution_error": adapter.revision_resolution_error,
         "device": adapter.device,
         "dtype": adapter.dtype,
-        "seeds": {"base": args.seed, "candidate_namespace": SEED_NAMESPACE},
-        "config_hashes": {"mvp": sha256(Path("configs/mvp.toml"))},
+        "seeds": {
+            "base": args.seed,
+            "candidate_namespace": SEED_NAMESPACE,
+            "candidate_material": state["candidate_seed_material"],
+        },
+        "config_hashes": {"mvp": config_hash, "candidate_registry": registry_hash},
         "dataset_hashes": dataset_hashes,
         "record_hashes": {"v1": records_hash},
-        "command_arguments": vars(args),
+        "expected_example_counts": {"v1": config.discovery_examples}
+        | {item.candidate_id: config.discovery_examples for item in registry},
+        "processed_example_counts": {"v1": v1_metrics.example_count + v1_metrics.failed_count}
+        | {
+            item.candidate_id: candidate_metrics[item.candidate_id].example_count
+            + candidate_metrics[item.candidate_id].failed_count
+            for item in registry
+        },
+        "command_arguments": {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(args).items()
+        },
         "created_at": datetime.now(UTC).isoformat(),
+        "complete": True,
     }
-    manifest["command_arguments"]["output"] = str(args.output)
     _json(root / "run_manifest.json", manifest)
     print(f"Discovery pipeline: {status}")
     print(f"Artifacts: {root}")
@@ -281,8 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     discovery.add_argument("--batch-size", type=int, default=8)
     discovery.add_argument("--seed", type=int, default=42)
     discovery.add_argument("--output", type=Path, default=Path("artifacts/discovery_pipeline"))
-    discovery.add_argument("--resume", action="store_true")
-    discovery.add_argument("--force", action="store_true")
+    reuse = discovery.add_mutually_exclusive_group()
+    reuse.add_argument("--resume", action="store_true")
+    reuse.add_argument("--force", action="store_true")
     return parser
 
 

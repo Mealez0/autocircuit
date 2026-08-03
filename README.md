@@ -72,7 +72,14 @@ behavioral eligibility.
 Outputs live at `artifacts/discovery_pipeline/<run-id>/`: `run_manifest.json`, v1 baseline records
 and diagnostic JSON/Markdown under `v1/`, complete per-candidate datasets/results under
 `candidates/`, comparison JSON/Markdown, optional `selected_v2.json`, and `final_status.json`.
-Generated artifacts and model caches are not source controlled.
+Every reusable output is recorded with a SHA-256 hash in the run manifest. `--resume` validates
+the command/config fingerprint and all completed step hashes before continuing from an interrupted
+run; `--force` starts over, and the two flags are mutually exclusive.
+
+When a candidate is eligible with zero processing failures, the pipeline also writes the
+deterministic declarative contract `configs/mvp_v2.toml` while retaining `selected_v2.json` in the
+runtime artifacts. It will not overwrite that reviewable contract without `--force`. Generated
+datasets, results, and model caches remain untracked.
 
 Project no.24 in [AI Safety Camp 2025](https://www.aisafety.camp/)
 

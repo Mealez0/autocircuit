@@ -18,6 +18,7 @@ from autocircuit.datasets.validation import (
 )
 
 GENERATOR_VERSION = "1.0.0"
+V2_GENERATOR_VERSION = "2.0.0"
 TEMPLATES = (("likes", "."), ("prefers", "."), ("chooses", "."))
 ENTITIES = (
     ("Alice", "Aaron", "Abel", "Ada", "Aiden", "Alan", "Amy", "Anna", "April", "Ava"),
@@ -103,6 +104,32 @@ class GenerationParameters:
     relation_mode: str = "sampled"
     separator: str = "newline"
 
+    def validate(self) -> None:
+        template_names = {template for template, _ in TEMPLATES}
+        unknown = set(self.allowed_templates) - template_names
+        if unknown:
+            raise ValueError(f"unknown allowed template(s): {sorted(unknown)}")
+        if not self.allowed_templates:
+            raise ValueError("allowed_templates cannot be empty")
+        if self.relation_mode not in {"fixed", "sampled"}:
+            raise ValueError("relation_mode must be 'fixed' or 'sampled'")
+        if self.relation_mode == "fixed" and len(self.allowed_templates) != 1:
+            raise ValueError("fixed relation_mode requires exactly one allowed template")
+        if self.separator not in {"newline", "blank_line"}:
+            raise ValueError("separator must be 'newline' or 'blank_line'")
+        positions = {"first", "interior", "last"}
+        if not self.allowed_query_positions:
+            raise ValueError("allowed_query_positions cannot be empty")
+        unknown_positions = set(self.allowed_query_positions) - positions
+        if unknown_positions:
+            raise ValueError(f"unknown normalized query position(s): {sorted(unknown_positions)}")
+        if self.minimum_fact_count < 3:
+            raise ValueError("minimum_fact_count must be at least 3")
+        if self.maximum_fact_count < self.minimum_fact_count:
+            raise ValueError("maximum_fact_count must be >= minimum_fact_count")
+        if self.maximum_fact_count > min(len(group) for group in ENTITIES):
+            raise ValueError("maximum_fact_count exceeds available entity population")
+
 
 def _prompt(
     assignments: list[tuple[str, str]], query: str, relation: str, stop: str, separator: str
@@ -141,13 +168,7 @@ def generate_split(
         raise ValueError("unknown split or non-positive count")
     index = SPLITS.index(split)
     parameters = parameters or GenerationParameters()
-    if (
-        parameters.minimum_fact_count < 3
-        or parameters.maximum_fact_count < parameters.minimum_fact_count
-    ):
-        raise ValueError("invalid fact-count range")
-    if not parameters.allowed_templates or not parameters.allowed_query_positions:
-        raise ValueError("templates and query positions cannot be empty")
+    parameters.validate()
     seed_material = (
         f"{seed}:{split}:{GENERATOR_VERSION}"
         if seed_namespace == "legacy-v1"
@@ -201,6 +222,18 @@ def generate_split(
             continue
         seen.add(family_id)
         identity = _digest([seed, split, attempt, family_id])[:20]
+        metadata: dict[str, Any] = {
+            "assignments": [list(pair) for pair in assignments],
+            "query_entity": query,
+            "fact_count": fact_count,
+            "query_position": "final_next_token",
+            "prompt_token_length": clean_length,
+        }
+        if seed_namespace != "legacy-v1":
+            metadata |= {
+                "query_fact_index": query_index,
+                "normalized_query_position": normalized_query_position(query_index, fact_count),
+            }
         results.append(
             ExamplePair(
                 example_id=f"ar-{identity}",
@@ -215,15 +248,7 @@ def generate_split(
                 changed_factor="queried_value_swap",
                 seed=seed,
                 template_id=f"{relation}-v1",
-                metadata={
-                    "assignments": [list(pair) for pair in assignments],
-                    "query_entity": query,
-                    "fact_count": fact_count,
-                    "query_fact_index": query_index,
-                    "normalized_query_position": normalized_query_position(query_index, fact_count),
-                    "query_position": "final_next_token",
-                    "prompt_token_length": clean_length,
-                },
+                metadata=metadata,
             )
         )
         if len(results) == count:

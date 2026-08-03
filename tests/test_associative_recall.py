@@ -10,6 +10,7 @@ import pytest
 from autocircuit.config import MVPConfig
 from autocircuit.datasets.associative_recall import (
     VALUES,
+    GenerationParameters,
     generate_dataset,
     generate_split,
     read_jsonl,
@@ -54,6 +55,13 @@ def test_same_seed_is_byte_deterministic(tmp_path: Path) -> None:
     assert one.read_bytes() == two.read_bytes()
 
 
+def test_legacy_v1_golden_hash_is_unchanged(tmp_path: Path) -> None:
+    examples, _ = generate_split("discovery", 12, 42, FakeTokenizer())
+    assert write_jsonl(tmp_path / "golden.jsonl", examples) == (
+        "ed2306d041b4cf31f528815d02c82ef082e1ad4c29a080ab2b4ca0a2f0e01675"
+    )
+
+
 def test_different_seed_changes_generation() -> None:
     first, _ = generate_dataset(small_config(1), FakeTokenizer())
     second, _ = generate_dataset(small_config(2), FakeTokenizer())
@@ -96,6 +104,23 @@ def test_single_token_validation() -> None:
 def test_insufficient_vocabulary_has_actionable_error() -> None:
     with pytest.raises(DatasetValidationError, match="could not generate"):
         generate_split("discovery", 1, 42, FakeTokenizer(invalid=True), max_attempts=3)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        (GenerationParameters(allowed_templates=("unknown",)), "unknown allowed template"),
+        (GenerationParameters(relation_mode="other"), "relation_mode"),
+        (GenerationParameters(separator="spaces"), "separator"),
+        (GenerationParameters(allowed_query_positions=("middle",)), "query position"),
+        (GenerationParameters(minimum_fact_count=2), "at least 3"),
+    ],
+)
+def test_v2_generation_parameters_are_strictly_validated(
+    parameters: GenerationParameters, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        generate_split("discovery", 1, 42, FakeTokenizer(), parameters=parameters)
 
 
 def test_jsonl_round_trip_and_hash(tmp_path: Path) -> None:
