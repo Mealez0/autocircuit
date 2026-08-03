@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -74,6 +75,11 @@ def make_example_result(
     corrupt_target: float,
     corrupt_distractor: float,
 ) -> ExampleResult:
+    if not all(
+        math.isfinite(value)
+        for value in (clean_target, clean_distractor, corrupt_target, corrupt_distractor)
+    ):
+        raise ValueError("non-finite model logit")
     clean_ld = clean_target - clean_distractor
     corrupt_ld = corrupt_target - corrupt_distractor
     metadata = example.metadata
@@ -199,6 +205,14 @@ def baseline_passes(metrics: BaselineMetrics) -> bool:
     return metrics.clean_accuracy >= 0.80 and metrics.clean_mean_logit_difference >= 1.0
 
 
+def baseline_is_eligible(metrics: BaselineMetrics, expected_count: int) -> bool:
+    return (
+        baseline_passes(metrics)
+        and metrics.failed_count == 0
+        and metrics.example_count + metrics.failed_count == expected_count
+    )
+
+
 def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -226,42 +240,47 @@ def evaluate(
     corrupt_differences: list[float] = []
     records_by_id: dict[str, ExampleResult] = {}
     failed = 0
-    for start in range(0, len(examples), batch_size):
-        batch = examples[start : start + batch_size]
-        buckets: dict[int, list[Any]] = {}
-        for item in batch:
-            buckets.setdefault(int(item.metadata["prompt_token_length"]), []).append(item)
-        for group in buckets.values():
-            try:
-                clean_logits = model([item.clean_prompt for item in group], return_type="logits")[
-                    :, -1
-                ]
-                corrupt_logits = model(
-                    [item.corrupt_prompt for item in group], return_type="logits"
-                )[:, -1]
-                for row, item in enumerate(group):
-                    target, distractor = item.target_token_id, item.distractor_token_id
-                    record = make_example_result(
-                        item,
-                        float(clean_logits[row, target]),
-                        float(clean_logits[row, distractor]),
-                        float(corrupt_logits[row, target]),
-                        float(corrupt_logits[row, distractor]),
-                    )
-                    records_by_id[item.example_id] = record
-                    clean_differences.append(successful_difference(record.clean_logit_difference))
-                    corrupt_differences.append(
-                        successful_difference(record.corrupt_logit_difference)
-                    )
-            except (RuntimeError, ValueError) as exc:
-                failed += len(group)
-                for item in group:
-                    records_by_id[item.example_id] = make_failed_result(item, exc)
+    with torch.inference_mode():
+        for start in range(0, len(examples), batch_size):
+            batch = examples[start : start + batch_size]
+            buckets: dict[int, list[Any]] = {}
+            for item in batch:
+                buckets.setdefault(int(item.metadata["prompt_token_length"]), []).append(item)
+            for group in buckets.values():
+                try:
+                    clean_logits = model(
+                        [item.clean_prompt for item in group], return_type="logits"
+                    )[:, -1]
+                    corrupt_logits = model(
+                        [item.corrupt_prompt for item in group], return_type="logits"
+                    )[:, -1]
+                    for row, item in enumerate(group):
+                        target, distractor = item.target_token_id, item.distractor_token_id
+                        record = make_example_result(
+                            item,
+                            float(clean_logits[row, target]),
+                            float(clean_logits[row, distractor]),
+                            float(corrupt_logits[row, target]),
+                            float(corrupt_logits[row, distractor]),
+                        )
+                        records_by_id[item.example_id] = record
+                        clean_differences.append(
+                            successful_difference(record.clean_logit_difference)
+                        )
+                        corrupt_differences.append(
+                            successful_difference(record.corrupt_logit_difference)
+                        )
+                except (RuntimeError, ValueError) as exc:
+                    failed += len(group)
+                    for item in group:
+                        records_by_id[item.example_id] = make_failed_result(item, exc)
     records = [records_by_id[item.example_id] for item in examples]
     metrics = metrics_from_differences(clean_differences, corrupt_differences, failed_count=failed)
     manifest_path = dataset / "manifest.json"
     manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    passed = baseline_passes(metrics)
+    expected_count = len(examples)
+    processed_count = metrics.example_count + metrics.failed_count
+    passed = baseline_is_eligible(metrics, expected_count)
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{split}-{seed}"
     output = output_root / run_id
     output.mkdir(parents=True, exist_ok=False)
@@ -270,6 +289,8 @@ def evaluate(
         "baseline": "PASS" if passed else "FAIL",
         "split": split,
         "metrics": asdict(metrics),
+        "expected_example_count": expected_count,
+        "processed_example_count": processed_count,
         "acceptance": {"minimum_clean_accuracy": 0.8, "minimum_clean_mean_ld": 1.0},
         "model_id": model_id,
         "model_revision": revision,

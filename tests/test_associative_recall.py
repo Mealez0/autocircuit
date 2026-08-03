@@ -9,10 +9,13 @@ import pytest
 
 from autocircuit.config import MVPConfig
 from autocircuit.datasets.associative_recall import (
+    GENERATOR_VERSION,
+    V2_GENERATOR_VERSION,
     VALUES,
     GenerationParameters,
     generate_dataset,
     generate_split,
+    generation_seed_material,
     read_jsonl,
     write_jsonl,
 )
@@ -56,10 +59,28 @@ def test_same_seed_is_byte_deterministic(tmp_path: Path) -> None:
 
 
 def test_legacy_v1_golden_hash_is_unchanged(tmp_path: Path) -> None:
+    assert GENERATOR_VERSION == "1.0.0"
     examples, _ = generate_split("discovery", 12, 42, FakeTokenizer())
     assert write_jsonl(tmp_path / "golden.jsonl", examples) == (
         "ed2306d041b4cf31f528815d02c82ef082e1ad4c29a080ab2b4ca0a2f0e01675"
     )
+
+
+def test_v2_seed_material_uses_v2_generator_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert V2_GENERATOR_VERSION == "2.0.0"
+    original = generation_seed_material(42, "discovery", "candidate:control")
+    assert original.endswith(":2.0.0")
+    original_examples, _ = generate_split(
+        "discovery", 4, 42, FakeTokenizer(), seed_namespace="candidate:control"
+    )
+    monkeypatch.setattr("autocircuit.datasets.associative_recall.V2_GENERATOR_VERSION", "2.0.1")
+    assert generation_seed_material(42, "discovery", "candidate:control") != original
+    changed_examples, _ = generate_split(
+        "discovery", 4, 42, FakeTokenizer(), seed_namespace="candidate:control"
+    )
+    assert [item.clean_prompt for item in changed_examples] != [
+        item.clean_prompt for item in original_examples
+    ]
 
 
 def test_different_seed_changes_generation() -> None:

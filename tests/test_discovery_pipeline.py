@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -273,6 +274,73 @@ def test_resume_detects_tampered_candidate_and_report(
         pipeline.run_discovery(
             argparse.Namespace(**(vars(args) | {"resume": True})), lambda *unused: FakeAdapter()
         )
+
+
+def test_fully_failing_candidate_does_not_stop_later_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    configs.joinpath("mvp.toml").write_text(
+        '[experiment]\nmodel="pythia-70m"\nseed=2\n[splits]\ndiscovery=4\nvalidation=2\ntest=2\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    class MixedAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def score(self, examples: list[ExamplePair], batch_size: int):
+            del batch_size
+            self.calls += 1
+            if self.calls == 2:
+                return [
+                    make_failed_result(item, RuntimeError("candidate failed")) for item in examples
+                ]
+            return [make_example_result(item, 2.0, 0.0, -2.0, 0.0) for item in examples]
+
+    adapter = MixedAdapter()
+    args = argparse.Namespace(
+        model="pythia-70m",
+        revision="main",
+        device="cpu",
+        batch_size=2,
+        seed=2,
+        output=tmp_path / "artifacts",
+        resume=False,
+        force=False,
+    )
+    pipeline.run_discovery(args, lambda *unused: adapter)
+    comparison = json.loads(
+        (tmp_path / "artifacts" / "seed-2-main" / "candidate_comparison.json").read_text()
+    )
+    assert comparison["attempts"][0]["evaluation_status"] == "NO_VALID_EXAMPLES"
+    assert comparison["attempts"][0]["metrics"] is None
+    assert any(attempt["eligible"] for attempt in comparison["attempts"][1:])
+    frozen_path = tmp_path / "configs" / "mvp_v2.toml"
+    original_frozen = frozen_path.read_bytes()
+    manifest_path = tmp_path / "artifacts" / "seed-2-main" / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["external_artifacts"]["frozen_v2_config"] == {
+        "logical_identity": "configs/mvp_v2.toml",
+        "sha256": hashlib.sha256(original_frozen).hexdigest(),
+    }
+
+    # Simulate interruption after the external TOML checkpoint; identical TOML is reused.
+    manifest["complete"] = False
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    resumed = argparse.Namespace(**(vars(args) | {"resume": True}))
+    pipeline.run_discovery(resumed, lambda *unused: MixedAdapter())
+    assert frozen_path.read_bytes() == original_frozen
+
+    frozen_path.write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="hash verification"):
+        pipeline.run_discovery(resumed, lambda *unused: MixedAdapter())
+
+    forced = argparse.Namespace(**(vars(args) | {"force": True}))
+    pipeline.run_discovery(forced, lambda *unused: MixedAdapter())
+    assert frozen_path.read_bytes() == original_frozen
 
 
 def test_interrupted_resume_and_input_mismatch(

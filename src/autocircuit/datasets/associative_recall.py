@@ -149,6 +149,13 @@ def normalized_query_position(index: int, fact_count: int) -> str:
     return "interior"
 
 
+def generation_seed_material(seed: int, split: str, seed_namespace: str) -> str:
+    """Return the versioned deterministic seed material for a generation population."""
+    if seed_namespace == "legacy-v1":
+        return f"{seed}:{split}:{GENERATOR_VERSION}"
+    return f"{seed_namespace}:{seed}:{split}:{V2_GENERATOR_VERSION}"
+
+
 def _digest(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -169,11 +176,7 @@ def generate_split(
     index = SPLITS.index(split)
     parameters = parameters or GenerationParameters()
     parameters.validate()
-    seed_material = (
-        f"{seed}:{split}:{GENERATOR_VERSION}"
-        if seed_namespace == "legacy-v1"
-        else f"{seed_namespace}:{seed}:{split}:{GENERATOR_VERSION}"
-    )
+    seed_material = generation_seed_material(seed, split, seed_namespace)
     rng = random.Random(seed_material)
     rejected: dict[str, int] = {}
     results: list[ExamplePair] = []

@@ -39,6 +39,7 @@ from autocircuit.config import load_config
 from autocircuit.datasets.associative_recall import (
     ExamplePair,
     generate_split,
+    generation_seed_material,
     read_jsonl,
     write_jsonl,
 )
@@ -150,6 +151,15 @@ def _validate_checkpoints(root: Path, state: dict[str, Any]) -> None:
         verify_resume(root / relative, str(digest))
 
 
+def _validate_external_artifacts(state: dict[str, Any]) -> None:
+    frozen = state.get("external_artifacts", {}).get("frozen_v2_config")
+    if frozen is not None:
+        path = Path("configs/mvp_v2.toml")
+        if frozen.get("logical_identity") != "configs/mvp_v2.toml":
+            raise RuntimeError("invalid frozen v2 logical identity in run manifest")
+        verify_resume(path, str(frozen["sha256"]))
+
+
 def _metrics(records: list[ExampleResult]) -> BaselineMetrics:
     valid = [r for r in records if r.processing_status == "ok"]
     return metrics_from_differences(
@@ -193,6 +203,7 @@ def run_discovery(
         if manifest.get("input_fingerprint") != fingerprint:
             raise RuntimeError("resume inputs do not match the recorded command/config/model")
         _validate_checkpoints(root, manifest)
+        _validate_external_artifacts(manifest)
         if manifest.get("complete") is True:
             final_path = root / "final_status.json"
             if "final_status.json" not in manifest.get("artifact_hashes", {}):
@@ -259,9 +270,13 @@ def run_discovery(
         raise RuntimeError("candidate registry changed since the interrupted run")
     state["candidate_registry_hash"] = registry_hash
     state["candidate_seed_material"] = {
-        item.candidate_id: SEED_NAMESPACE + ":" + item.candidate_id for item in registry
+        item.candidate_id: generation_seed_material(
+            args.seed, "discovery", SEED_NAMESPACE + ":" + item.candidate_id
+        )
+        for item in registry
     }
     candidate_metrics: dict[str, BaselineMetrics] = {}
+    candidate_processed_counts: dict[str, int] = {}
     comparison: list[dict[str, Any]] = []
     dataset_hashes = {"v1": dataset_hash}
     for candidate in registry:
@@ -295,14 +310,25 @@ def run_discovery(
             records = adapter.score(examples, args.batch_size)
             write_example_results(candidate_records_path, records)
             _checkpoint(root, state, candidate_records_path)
-        metrics = _metrics(records)
-        candidate_metrics[candidate.candidate_id] = metrics
+        valid_records = [record for record in records if record.processing_status == "ok"]
+        candidate_processed_counts[candidate.candidate_id] = len(records)
+        metrics = _metrics(records) if valid_records else None
+        if metrics is not None:
+            candidate_metrics[candidate.candidate_id] = metrics
+        evaluation_status = (
+            "NO_VALID_EXAMPLES"
+            if metrics is None
+            else "PROCESSING_FAILED"
+            if metrics.failed_count
+            else "COMPLETE"
+        )
         summary = {
             "candidate": asdict(candidate),
-            "metrics": asdict(metrics),
-            "eligible": candidate_is_eligible(metrics, len(examples)),
+            "evaluation_status": evaluation_status,
+            "metrics": asdict(metrics) if metrics is not None else None,
+            "eligible": metrics is not None and candidate_is_eligible(metrics, len(examples)),
             "expected_example_count": len(examples),
-            "processed_example_count": metrics.example_count + metrics.failed_count,
+            "processed_example_count": len(records),
             "pre_model_rejections": rejections,
         }
         comparison.append(summary)
@@ -331,15 +357,23 @@ def run_discovery(
     ]
     for row in comparison:
         metric = row["metrics"]
-        lines.append(
-            "| {candidate} | {eligible} | {accuracy:.4f} | {ld:.4f} | {contrast:.4f} |".format(
-                candidate=row["candidate"]["candidate_id"],
-                eligible=row["eligible"],
-                accuracy=metric["clean_accuracy"],
-                ld=metric["clean_mean_logit_difference"],
-                contrast=metric["clean_corrupt_contrast"],
+        if metric is None:
+            lines.append(
+                f"| {row['candidate']['candidate_id']} | False ({row['evaluation_status']}) | "
+                "n/a | n/a | n/a |"
             )
-        )
+        else:
+            lines.append(
+                "| {candidate} | {eligible} ({status}) | {accuracy:.4f} | {ld:.4f} | "
+                "{contrast:.4f} |".format(
+                    candidate=row["candidate"]["candidate_id"],
+                    eligible=row["eligible"],
+                    status=row["evaluation_status"],
+                    accuracy=metric["clean_accuracy"],
+                    ld=metric["clean_mean_logit_difference"],
+                    contrast=metric["clean_corrupt_contrast"],
+                )
+            )
     (root / "candidate_comparison.md").write_bytes(("\n".join(lines) + "\n").encode())
     _checkpoint(root, state, root / "candidate_comparison.md")
     if selected_id:
@@ -360,10 +394,24 @@ def run_discovery(
         _checkpoint(root, state, root / "selected_v2.json")
         frozen_path = Path("configs/mvp_v2.toml")
         payload = frozen_toml(selected)
-        if frozen_path.exists() and not args.force:
-            raise RuntimeError("configs/mvp_v2.toml exists; use --force to overwrite it")
-        frozen_path.write_bytes(payload)
-        state["frozen_v2_config_hash"] = hashlib.sha256(payload).hexdigest()
+        expected_hash = hashlib.sha256(payload).hexdigest()
+        if frozen_path.exists():
+            if args.force:
+                frozen_path.write_bytes(payload)
+            elif args.resume and frozen_path.read_bytes() == payload:
+                pass
+            elif frozen_path.read_bytes() != payload:
+                raise RuntimeError("configs/mvp_v2.toml differs from the selected frozen contract")
+            else:
+                raise RuntimeError("configs/mvp_v2.toml exists; use --resume to reuse or --force")
+        else:
+            frozen_path.write_bytes(payload)
+        state.setdefault("external_artifacts", {})["frozen_v2_config"] = {
+            "logical_identity": "configs/mvp_v2.toml",
+            "sha256": expected_hash,
+        }
+        state["frozen_v2_config_hash"] = expected_hash
+        _json(root / "run_manifest.json", state)
     final = {
         "status": status,
         "software_success": True,
@@ -405,11 +453,7 @@ def run_discovery(
         "expected_example_counts": {"v1": config.discovery_examples}
         | {item.candidate_id: config.discovery_examples for item in registry},
         "processed_example_counts": {"v1": v1_metrics.example_count + v1_metrics.failed_count}
-        | {
-            item.candidate_id: candidate_metrics[item.candidate_id].example_count
-            + candidate_metrics[item.candidate_id].failed_count
-            for item in registry
-        },
+        | candidate_processed_counts,
         "command_arguments": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
