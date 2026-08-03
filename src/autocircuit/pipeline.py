@@ -50,7 +50,9 @@ from autocircuit.position_study import (
     json_has_only_finite_numbers,
     paired_position_effects,
     position_metrics,
+    secondary_summaries,
     validate_matched_dataset,
+    validate_scoring_identity,
     write_dataset,
 )
 from autocircuit.runtime import select_device
@@ -209,7 +211,7 @@ def run_position_study(
         write_dataset(dataset_path, examples)
         _checkpoint(root, state, dataset_path)
     # This is intentionally immediately before scoring, and raises on any mismatch.
-    balance = validate_matched_dataset(examples)
+    balance = validate_matched_dataset(examples, adapter.tokenizer)
     balance_path = root / "balance_report.json"
     _json(balance_path, balance)
     _checkpoint(root, state, balance_path)
@@ -219,18 +221,21 @@ def run_position_study(
         records = read_results(records_path)
     else:
         records = adapter.score(examples, args.batch_size)
-        if len(records) != len(examples):
-            raise RuntimeError("adapter did not retain one result for every example")
         write_example_results(records_path, records)
         _checkpoint(root, state, records_path)
+    validate_scoring_identity(examples, records)
     metrics = position_metrics(records)
     effects = paired_position_effects(records, seed=args.seed)
+    secondary = secondary_summaries(records)
     metrics_path = root / "position_metrics.json"
     effects_path = root / "paired_position_effects.json"
     _json(metrics_path, metrics)
     _checkpoint(root, state, metrics_path)
     _json(effects_path, effects)
     _checkpoint(root, state, effects_path)
+    secondary_path = root / "secondary_summaries.json"
+    _json(secondary_path, secondary)
+    _checkpoint(root, state, secondary_path)
     status = decision_status(metrics, effects, balance)
     final = {
         "status": status,
@@ -277,6 +282,10 @@ def run_position_study(
         "in `balance_report.json`. These summaries are secondary and do not alter the "
         "decision rule.",
         "",
+        "Descriptive performance by target token, distractor token, and query entity is in "
+        "`secondary_summaries.json`, including counts, accuracies, logit differences, and "
+        "contrasts. These results are secondary and never enter eligibility.",
+        "",
         "## Software and scientific status",
         "",
         "- Software success: **yes** (scientific failure is a successful software outcome).",
@@ -290,7 +299,9 @@ def run_position_study(
     final_path = root / "final_status.json"
     _json(final_path, final)
     _checkpoint(root, state, final_path)
-    if not json_has_only_finite_numbers({"metrics": metrics, "effects": effects}):
+    if not json_has_only_finite_numbers(
+        {"metrics": metrics, "effects": effects, "secondary": secondary}
+    ):
         raise RuntimeError("non-finite value in JSON output")
     state |= {
         "complete": True,

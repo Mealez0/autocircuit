@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -30,17 +32,26 @@ def generate_matched_position_dataset(
     tokenizer: Tokenizer, seed: int = 42
 ) -> list[ExamplePair]:
     """Generate 120 balanced families, each presented at all three positions."""
-    values = VALUES[0]
-    entities = ENTITIES[0]
+    rng = random.Random(f"{GENERATOR_VERSION}:seed:{seed}")
+    values = list(VALUES[0])
+    entities = list(ENTITIES[0])
+    offsets = list(range(1, len(values)))
+    rng.shuffle(values)
+    rng.shuffle(entities)
+    rng.shuffle(offsets)
+    offsets = offsets[: len(entities)]
+    population = [
+        (target, query)
+        for query in range(len(entities))
+        for target in range(len(values))
+    ]
+    rng.shuffle(population)
     examples: list[ExamplePair] = []
-    for family_number in range(FAMILY_COUNT):
-        target_index = family_number % len(values)
-        query_index = (family_number // len(values)) % len(entities)
-        # Ten distinct nonzero cyclic offsets give unique, balanced ordered pairs.
-        distractor_index = (target_index + query_index + 1) % len(values)
-        third_index = (target_index + query_index + 2) % len(values)
-        if third_index == distractor_index:
-            third_index = (third_index + 1) % len(values)
+    for target_index, query_index in population:
+        distractor_index = (target_index + offsets[query_index]) % len(values)
+        third_index = next(
+            index for index in range(len(values)) if index not in {target_index, distractor_index}
+        )
         query = entities[query_index]
         other_entities = [
             entities[(query_index + 1) % len(entities)],
@@ -58,7 +69,8 @@ def generate_matched_position_dataset(
             (other_entities[1], values[third_index]),
         ]
         target_id, distractor_id = validate_answer_tokens(tokenizer, target, distractor)
-        matched_id = f"position-family-{family_number:03d}"
+        provenance = f"{GENERATOR_VERSION}:{seed}:{target_index}:{query_index}"
+        matched_id = "position-family-" + hashlib.sha256(provenance.encode()).hexdigest()[:16]
         orders = ((0, 1, 2), (1, 0, 2), (1, 2, 0))
         for position_index, (position, order) in enumerate(zip(POSITIONS, orders, strict=True)):
             clean_ordered = [assignments[index] for index in order]
@@ -97,11 +109,11 @@ def generate_matched_position_dataset(
                     },
                 )
             )
-    validate_matched_dataset(examples)
+    validate_matched_dataset(examples, tokenizer)
     return examples
 
 
-def validate_matched_dataset(examples: list[ExamplePair]) -> dict[str, Any]:
+def validate_matched_dataset(examples: list[ExamplePair], tokenizer: Tokenizer) -> dict[str, Any]:
     """Fail closed on every preregistered population and within-family invariant."""
     if len(examples) != FAMILY_COUNT * len(POSITIONS):
         raise ValueError("expected exactly 360 examples")
@@ -123,37 +135,89 @@ def validate_matched_dataset(examples: list[ExamplePair]) -> dict[str, Any]:
         by_position = {str(item.metadata["normalized_query_position"]): item for item in variants}
         if set(by_position) != set(POSITIONS) or len(variants) != 3:
             raise ValueError(f"family {family_id} lacks exactly one variant per position")
-        first = variants[0]
-        invariant = (
-            first.metadata["assignments"],
-            first.metadata["corrupt_assignments"],
-            first.metadata["query_entity"],
-            first.target_text,
-            first.distractor_text,
-            first.target_token_id,
-            first.distractor_token_id,
-        )
+        first = by_position["first"]
+        if first.template_id != "chooses-position-study-v1":
+            raise ValueError("relation template must be exactly chooses")
+        assignments = [tuple(item) for item in first.metadata.get("assignments", [])]
+        corrupt = [tuple(item) for item in first.metadata.get("corrupt_assignments", [])]
+        if len(assignments) != 3 or int(first.metadata.get("fact_count", -1)) != 3:
+            raise ValueError("fact count must be exactly 3")
+        query = str(first.metadata.get("query_entity"))
+        if assignments[0] != (query, first.target_text):
+            raise ValueError("canonical query assignment does not match target")
+        distractor_indices = [
+            i for i, item in enumerate(assignments) if item[1] == first.distractor_text
+        ]
+        if len(distractor_indices) != 1 or distractor_indices[0] == 0:
+            raise ValueError("canonical distractor assignment is invalid")
+        swap_index = distractor_indices[0]
+        expected_corrupt = assignments.copy()
+        expected_corrupt[0] = (query, first.distractor_text)
+        expected_corrupt[swap_index] = (assignments[swap_index][0], first.target_text)
+        if corrupt != expected_corrupt:
+            raise ValueError("corrupt assignments are not the exact target/distractor swap")
+        invariant_pair = asdict(first)
+        invariant_metadata = invariant_pair.pop("metadata")
+        permitted_pair = {"example_id", "clean_prompt", "corrupt_prompt"}
+        permitted_metadata = {
+            "ordering",
+            "query_fact_index",
+            "normalized_query_position",
+            "prompt_token_length",
+        }
+        lengths: set[int] = set()
         for position, item in by_position.items():
-            candidate = (
-                item.metadata["assignments"],
-                item.metadata["corrupt_assignments"],
-                item.metadata["query_entity"],
-                item.target_text,
-                item.distractor_text,
-                item.target_token_id,
-                item.distractor_token_id,
-            )
-            if candidate != invariant or item.metadata["matched_family_id"] != family_id:
-                raise ValueError(f"family matching invariant failed for {family_id}")
+            candidate_pair = asdict(item)
+            candidate_metadata = candidate_pair.pop("metadata")
+            if any(
+                candidate_pair[key] != invariant_pair[key]
+                for key in invariant_pair
+                if key not in permitted_pair
+            ):
+                raise ValueError(f"invariant ExamplePair field changed in {family_id}")
+            if any(
+                candidate_metadata.get(key) != invariant_metadata.get(key)
+                for key in set(candidate_metadata) | set(invariant_metadata)
+                if key not in permitted_metadata
+            ):
+                raise ValueError(f"invariant metadata field changed in {family_id}")
+            if item.metadata.get("matched_family_id") != family_id:
+                raise ValueError(f"matched family ID mismatch for {family_id}")
+            ordering = item.metadata.get("ordering")
+            if not isinstance(ordering, list) or sorted(ordering) != [0, 1, 2]:
+                raise ValueError("ordering metadata is not a permutation")
+            if [index for index in ordering if index != 0] != [1, 2]:
+                raise ValueError("non-query facts changed relative order")
+            actual_index = ordering.index(0)
+            actual_position = POSITIONS[actual_index]
+            if item.metadata.get("query_fact_index") != actual_index or position != actual_position:
+                raise ValueError("query position metadata disagrees with ordering")
+            clean_ordered = [assignments[index] for index in ordering]
+            corrupt_ordered = [corrupt[index] for index in ordering]
+            if item.clean_prompt != _prompt(clean_ordered, query):
+                raise ValueError("clean prompt cannot be reconstructed exactly")
+            if item.corrupt_prompt != _prompt(corrupt_ordered, query):
+                raise ValueError("corrupt prompt cannot be reconstructed exactly")
             if item.target_text == item.distractor_text:
                 raise ValueError("target equals distractor")
-            if item.metadata["prompt_token_length"] != len(
-                item.metadata.get("prompt_token_ids", [])
-            ) and "prompt_token_ids" in item.metadata:
-                raise ValueError("recorded prompt token length is invalid")
+            target_id, distractor_id = validate_answer_tokens(
+                tokenizer, item.target_text, item.distractor_text
+            )
+            if (target_id, distractor_id) != (item.target_token_id, item.distractor_token_id):
+                raise ValueError("answer token IDs are invalid")
+            clean_length = len(tokenizer.encode(item.clean_prompt, add_special_tokens=False))
+            corrupt_length = len(tokenizer.encode(item.corrupt_prompt, add_special_tokens=False))
+            if (
+                clean_length != corrupt_length
+                or item.metadata.get("prompt_token_length") != clean_length
+            ):
+                raise ValueError("clean/corrupt or recorded token lengths differ")
+            lengths.add(clean_length)
             position_marginals[position][
                 (item.target_text, item.distractor_text, str(item.metadata["query_entity"]))
             ] += 1
+        if len(lengths) != 1:
+            raise ValueError("position variants have unequal prompt token lengths")
         targets[first.target_text] += 1
         distractors[first.distractor_text] += 1
         queries[str(first.metadata["query_entity"])] += 1
@@ -166,8 +230,21 @@ def validate_matched_dataset(examples: list[ExamplePair]) -> dict[str, Any]:
         raise ValueError("query entity balance failed")
     if len({tuple(sorted(counter.items())) for counter in position_marginals.values()}) != 1:
         raise ValueError("position lexical marginals differ")
-    if max(ordered_pairs.values()) - min(ordered_pairs.values()) > 1:
+    complete_pairs = {
+        (target, distractor): ordered_pairs[(target, distractor)]
+        for target in VALUES[0]
+        for distractor in VALUES[0]
+        if target != distractor
+    }
+    pair_values = list(complete_pairs.values())
+    if Counter(pair_values) != Counter({0: 12, 1: 120}):
+        raise ValueError("ordered pair population is not the exact balanced design")
+    if max(pair_values) - min(pair_values) > 1:
         raise ValueError("ordered pairs are not balanced as possible")
+    pair_mapping = {
+        f"{target}|{distractor}": count
+        for (target, distractor), count in complete_pairs.items()
+    }
     return {
         "all_invariants_passed": True,
         "generator_version": GENERATOR_VERSION,
@@ -176,8 +253,14 @@ def validate_matched_dataset(examples: list[ExamplePair]) -> dict[str, Any]:
         "target_counts": dict(sorted(targets.items())),
         "distractor_counts": dict(sorted(distractors.items())),
         "query_entity_counts": dict(sorted(queries.items())),
-        "ordered_pair_minimum": min(ordered_pairs.values()),
-        "ordered_pair_maximum": max(ordered_pairs.values()),
+        "ordered_pair_observed_count": sum(count > 0 for count in pair_values),
+        "ordered_pair_missing_count": sum(count == 0 for count in pair_values),
+        "ordered_pair_minimum_including_zero": min(pair_values),
+        "ordered_pair_maximum": max(pair_values),
+        "ordered_pair_counts": pair_mapping,
+        "ordered_pair_counts_sha256": hashlib.sha256(
+            json.dumps(pair_mapping, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
         "positions": list(POSITIONS),
     }
 
@@ -214,6 +297,68 @@ def position_metrics(records: list[ExampleResult]) -> dict[str, Any]:
             }
         else:
             output[position] = {"example_count": 0, "failed_count": len(selected)}
+    return output
+
+
+def validate_scoring_identity(examples: list[ExamplePair], records: list[ExampleResult]) -> None:
+    """Require a one-to-one identity-preserving result for every expected example."""
+    expected = {item.example_id: item for item in examples}
+    if len(expected) != len(examples):
+        raise ValueError("dataset example IDs are not unique")
+    actual_ids = [record.example_id for record in records]
+    if len(set(actual_ids)) != len(actual_ids):
+        raise ValueError("result example IDs are not unique")
+    if set(actual_ids) != set(expected):
+        raise ValueError("result example IDs do not exactly match the dataset")
+    for record in records:
+        item = expected[record.example_id]
+        if record.family_id != item.family_id:
+            raise ValueError(f"result family ID changed for {record.example_id}")
+        if record.normalized_query_position != item.metadata["normalized_query_position"]:
+            raise ValueError(f"result position changed for {record.example_id}")
+
+
+def secondary_summaries(records: list[ExampleResult]) -> dict[str, Any]:
+    """Compute descriptive lexical/entity performance; never used for eligibility."""
+    dimensions: dict[str, Callable[[ExampleResult], str]] = {
+        "target_token": lambda record: record.target_text,
+        "distractor_token": lambda record: record.distractor_text,
+        "query_entity": lambda record: record.query_entity,
+    }
+    output: dict[str, Any] = {"role": "secondary_descriptive_only"}
+    for dimension, key_function in dimensions.items():
+        grouped: dict[str, list[ExampleResult]] = defaultdict(list)
+        for record in records:
+            grouped[key_function(record)].append(record)
+        summaries: dict[str, Any] = {}
+        for key in sorted(grouped):
+            selected = grouped[key]
+            valid = [record for record in selected if record.processing_status == "ok"]
+            if not valid:
+                summaries[key] = {
+                    "count": 0,
+                    "failed_count": len(selected),
+                    "clean_accuracy": None,
+                    "corrupt_accuracy": None,
+                    "mean_clean_logit_difference": None,
+                    "mean_corrupt_logit_difference": None,
+                    "clean_corrupt_contrast": None,
+                }
+                continue
+            clean = [successful_difference(record.clean_logit_difference) for record in valid]
+            corrupt = [successful_difference(record.corrupt_logit_difference) for record in valid]
+            clean_mean = sum(clean) / len(clean)
+            corrupt_mean = sum(corrupt) / len(corrupt)
+            summaries[key] = {
+                "count": len(valid),
+                "failed_count": len(selected) - len(valid),
+                "clean_accuracy": sum(value > 0 for value in clean) / len(clean),
+                "corrupt_accuracy": sum(value < 0 for value in corrupt) / len(corrupt),
+                "mean_clean_logit_difference": clean_mean,
+                "mean_corrupt_logit_difference": corrupt_mean,
+                "clean_corrupt_contrast": clean_mean - corrupt_mean,
+            }
+        output[dimension] = summaries
     return output
 
 
@@ -263,18 +408,31 @@ def paired_position_effects(
                 "bootstrap_samples": samples,
                 "bootstrap_seed": seed,
             }
-    transitions: dict[str, Counter[str]] = {}
+    transitions: dict[str, dict[str, Counter[str]]] = {}
     for left, right in specs:
-        counter: Counter[str] = Counter()
+        counters = {
+            "clean_correct": Counter[str](),
+            "corrupt_correct": Counter[str](),
+            "joint_clean_corrupt_state": Counter[str](),
+        }
         for variants in complete.values():
             a, b = variants[left], variants[right]
-            counter[f"{bool(a.clean_correct)}->{bool(b.clean_correct)}"] += 1
-        transitions[f"{left}_to_{right}_clean_correct"] = counter
+            counters["clean_correct"][f"{bool(a.clean_correct)}->{bool(b.clean_correct)}"] += 1
+            counters["corrupt_correct"][
+                f"{bool(a.corrupt_correct)}->{bool(b.corrupt_correct)}"
+            ] += 1
+            a_joint = f"clean={bool(a.clean_correct)},corrupt={bool(a.corrupt_correct)}"
+            b_joint = f"clean={bool(b.clean_correct)},corrupt={bool(b.corrupt_correct)}"
+            counters["joint_clean_corrupt_state"][f"{a_joint}->{b_joint}"] += 1
+        transitions[f"{left}_to_{right}"] = counters
     return {
         "complete_family_count": len(complete),
         "comparisons": comparisons,
         "paired_correctness_transitions": {
-            key: dict(sorted(value.items())) for key, value in transitions.items()
+            comparison: {
+                kind: dict(sorted(counter.items())) for kind, counter in kinds.items()
+            }
+            for comparison, kinds in transitions.items()
         },
     }
 
@@ -290,6 +448,12 @@ def decision_status(
         and first.get("mean_clean_logit_difference", -math.inf) >= 1.0
         and first["failed_count"] == 0
         and first["example_count"] == FAMILY_COUNT
+        and all(
+            metrics[position]["example_count"] == FAMILY_COUNT
+            and metrics[position]["failed_count"] == 0
+            for position in POSITIONS
+        )
+        and effects.get("complete_family_count") == FAMILY_COUNT
         and comparison["estimate"] is not None
         and comparison["estimate"] > 0
         and ci is not None
