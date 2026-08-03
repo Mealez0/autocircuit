@@ -271,7 +271,8 @@ def _bootstrap(values: list[float], seed: int, samples: int = 10_000) -> list[fl
     generator = torch.Generator(device="cpu").manual_seed(seed)
     indexes = torch.randint(len(values), (samples, len(values)), generator=generator)
     means = tensor[indexes].mean(dim=1)
-    bounds = torch.quantile(means, torch.tensor([0.025, 0.975]))
+    levels = torch.tensor([0.025, 0.975], dtype=tensor.dtype)
+    bounds = torch.quantile(means, levels)
     return [float(bounds[0]), float(bounds[1])]
 
 
