@@ -1,6 +1,6 @@
 import pytest
 
-from autocircuit.baseline import baseline_passes, metrics_from_differences
+from autocircuit.baseline import baseline_is_eligible, baseline_passes, metrics_from_differences
 
 
 def test_baseline_metrics_from_synthetic_differences() -> None:
@@ -22,3 +22,9 @@ def test_baseline_frozen_acceptance_thresholds() -> None:
     assert baseline_passes(passing)
     with pytest.raises(ValueError, match="non-zero"):
         metrics_from_differences([], [])
+
+
+def test_partial_threshold_passing_baseline_is_not_eligible() -> None:
+    partial = metrics_from_differences([2.0] * 9, [-2.0] * 9, failed_count=1)
+    assert baseline_passes(partial)
+    assert not baseline_is_eligible(partial, expected_count=10)

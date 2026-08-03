@@ -18,6 +18,7 @@ from autocircuit.datasets.validation import (
 )
 
 GENERATOR_VERSION = "1.0.0"
+V2_GENERATOR_VERSION = "2.0.0"
 TEMPLATES = (("likes", "."), ("prefers", "."), ("chooses", "."))
 ENTITIES = (
     ("Alice", "Aaron", "Abel", "Ada", "Aiden", "Alan", "Amy", "Anna", "April", "Ava"),
@@ -92,9 +93,67 @@ class ExamplePair:
         return cls(**value)
 
 
-def _prompt(assignments: list[tuple[str, str]], query: str, relation: str, stop: str) -> str:
-    facts = "\n".join(f"{key} {relation}{value}{stop}" for key, value in assignments)
-    return f"{facts}\n{query} {relation}"
+@dataclass(frozen=True)
+class GenerationParameters:
+    """Population-level controls allowed in the preregistered v2 search."""
+
+    allowed_templates: tuple[str, ...] = ("likes", "prefers", "chooses")
+    minimum_fact_count: int = 3
+    maximum_fact_count: int = 6
+    allowed_query_positions: tuple[str, ...] = ("first", "interior", "last")
+    relation_mode: str = "sampled"
+    separator: str = "newline"
+
+    def validate(self) -> None:
+        template_names = {template for template, _ in TEMPLATES}
+        unknown = set(self.allowed_templates) - template_names
+        if unknown:
+            raise ValueError(f"unknown allowed template(s): {sorted(unknown)}")
+        if not self.allowed_templates:
+            raise ValueError("allowed_templates cannot be empty")
+        if self.relation_mode not in {"fixed", "sampled"}:
+            raise ValueError("relation_mode must be 'fixed' or 'sampled'")
+        if self.relation_mode == "fixed" and len(self.allowed_templates) != 1:
+            raise ValueError("fixed relation_mode requires exactly one allowed template")
+        if self.separator not in {"newline", "blank_line"}:
+            raise ValueError("separator must be 'newline' or 'blank_line'")
+        positions = {"first", "interior", "last"}
+        if not self.allowed_query_positions:
+            raise ValueError("allowed_query_positions cannot be empty")
+        unknown_positions = set(self.allowed_query_positions) - positions
+        if unknown_positions:
+            raise ValueError(f"unknown normalized query position(s): {sorted(unknown_positions)}")
+        if self.minimum_fact_count < 3:
+            raise ValueError("minimum_fact_count must be at least 3")
+        if self.maximum_fact_count < self.minimum_fact_count:
+            raise ValueError("maximum_fact_count must be >= minimum_fact_count")
+        if self.maximum_fact_count > min(len(group) for group in ENTITIES):
+            raise ValueError("maximum_fact_count exceeds available entity population")
+
+
+def _prompt(
+    assignments: list[tuple[str, str]], query: str, relation: str, stop: str, separator: str
+) -> str:
+    joiner = {"newline": "\n", "blank_line": "\n\n"}[separator]
+    facts = joiner.join(f"{key} {relation}{value}{stop}" for key, value in assignments)
+    return f"{facts}{joiner}{query} {relation}"
+
+
+def normalized_query_position(index: int, fact_count: int) -> str:
+    if not 0 <= index < fact_count:
+        raise ValueError("query index must be within the presented facts")
+    if index == 0:
+        return "first"
+    if index == fact_count - 1:
+        return "last"
+    return "interior"
+
+
+def generation_seed_material(seed: int, split: str, seed_namespace: str) -> str:
+    """Return the versioned deterministic seed material for a generation population."""
+    if seed_namespace == "legacy-v1":
+        return f"{seed}:{split}:{GENERATOR_VERSION}"
+    return f"{seed_namespace}:{seed}:{split}:{V2_GENERATOR_VERSION}"
 
 
 def _digest(value: object) -> str:
@@ -103,27 +162,43 @@ def _digest(value: object) -> str:
 
 
 def generate_split(
-    split: str, count: int, seed: int, tokenizer: Tokenizer, *, max_attempts: int | None = None
+    split: str,
+    count: int,
+    seed: int,
+    tokenizer: Tokenizer,
+    *,
+    max_attempts: int | None = None,
+    parameters: GenerationParameters | None = None,
+    seed_namespace: str = "legacy-v1",
 ) -> tuple[list[ExamplePair], dict[str, int]]:
     if split not in SPLITS or count <= 0:
         raise ValueError("unknown split or non-positive count")
     index = SPLITS.index(split)
-    rng = random.Random(f"{seed}:{split}:{GENERATOR_VERSION}")
+    parameters = parameters or GenerationParameters()
+    parameters.validate()
+    seed_material = generation_seed_material(seed, split, seed_namespace)
+    rng = random.Random(seed_material)
     rejected: dict[str, int] = {}
     results: list[ExamplePair] = []
     seen: set[str] = set()
     limit = max_attempts or count * 100
     for attempt in range(limit):
-        fact_count = rng.randint(3, 6)
+        fact_count = rng.randint(parameters.minimum_fact_count, parameters.maximum_fact_count)
         entities = rng.sample(ENTITIES[index], fact_count)
         values = rng.sample(VALUES[index], fact_count)
         assignments = list(zip(entities, values, strict=True))
         rng.shuffle(assignments)
-        query_index = rng.randrange(fact_count)
+        allowed_indices = [
+            i
+            for i in range(fact_count)
+            if normalized_query_position(i, fact_count) in parameters.allowed_query_positions
+        ]
+        query_index = rng.choice(allowed_indices)
         distractor_index = rng.choice([i for i in range(fact_count) if i != query_index])
         query, target = assignments[query_index]
         distractor = assignments[distractor_index][1]
-        relation, stop = rng.choice(TEMPLATES)
+        choices = [item for item in TEMPLATES if item[0] in parameters.allowed_templates]
+        relation, stop = choices[0] if parameters.relation_mode == "fixed" else rng.choice(choices)
         family_key = tuple(sorted(assignments))
         family_id = _digest(family_key)[:16]
         if family_id in seen:
@@ -139,8 +214,8 @@ def generate_split(
         corrupt[query_index] = (query, distractor)
         other_key = corrupt[distractor_index][0]
         corrupt[distractor_index] = (other_key, target)
-        clean_prompt = _prompt(assignments, query, relation, stop)
-        corrupt_prompt = _prompt(corrupt, query, relation, stop)
+        clean_prompt = _prompt(assignments, query, relation, stop, parameters.separator)
+        corrupt_prompt = _prompt(corrupt, query, relation, stop, parameters.separator)
         clean_length = len(tokenizer.encode(clean_prompt, add_special_tokens=False))
         corrupt_length = len(tokenizer.encode(corrupt_prompt, add_special_tokens=False))
         if clean_length != corrupt_length:
@@ -150,6 +225,18 @@ def generate_split(
             continue
         seen.add(family_id)
         identity = _digest([seed, split, attempt, family_id])[:20]
+        metadata: dict[str, Any] = {
+            "assignments": [list(pair) for pair in assignments],
+            "query_entity": query,
+            "fact_count": fact_count,
+            "query_position": "final_next_token",
+            "prompt_token_length": clean_length,
+        }
+        if seed_namespace != "legacy-v1":
+            metadata |= {
+                "query_fact_index": query_index,
+                "normalized_query_position": normalized_query_position(query_index, fact_count),
+            }
         results.append(
             ExamplePair(
                 example_id=f"ar-{identity}",
@@ -164,13 +251,7 @@ def generate_split(
                 changed_factor="queried_value_swap",
                 seed=seed,
                 template_id=f"{relation}-v1",
-                metadata={
-                    "assignments": [list(pair) for pair in assignments],
-                    "query_entity": query,
-                    "fact_count": fact_count,
-                    "query_position": "final_next_token",
-                    "prompt_token_length": clean_length,
-                },
+                metadata=metadata,
             )
         )
         if len(results) == count:

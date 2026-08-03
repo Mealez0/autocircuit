@@ -24,7 +24,7 @@ def _sha256(path: Path) -> str:
 
 
 def generate(config_path: Path, output: Path) -> None:
-    from transformers import AutoTokenizer
+    from transformers.models.auto.tokenization_auto import AutoTokenizer
 
     config = load_config(config_path)
     model_id = f"EleutherAI/{config.model}"

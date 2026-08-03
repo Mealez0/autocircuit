@@ -25,6 +25,22 @@ Before intervention, a split is eligible only if at least 80% of examples have p
 target-vs-distractor logit difference and their mean difference is at least 1.0. Failure stops
 discovery and is reported rather than silently filtering hard prompts.
 
+## Discovery-diagnostic stage
+
+The version-2 search is confined to discovery data. The orchestrator records every example and
+reports performance by template, fact count, presented query position, token length, answer pair,
+entity, and correctness quadrant, with deterministic bootstrap intervals and explicit underpowered
+labels. It then generates fresh datasets for a compact source-controlled candidate registry. These
+are population rules (fact range, relation template, query position, and separator), never
+output-selected examples or identities.
+
+The eligibility thresholds above remain frozen. Among eligible candidates the deterministic order
+is clean accuracy, mean clean logit difference, clean/corrupt contrast, and lexical candidate ID.
+No eligible candidate is a valid scientific stopping result rather than a software error. Neither
+validation nor test is opened in this stage, and a discovery-selected v2 still requires held-out
+evaluation. Activation patching and causal circuit discovery are explicitly deferred until the
+behavioral gate is satisfied.
+
 ## Metric and intervention protocol
 
 The primary per-example metric at the final query position is
