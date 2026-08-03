@@ -44,6 +44,18 @@ from autocircuit.datasets.associative_recall import (
     write_jsonl,
 )
 from autocircuit.diagnostics import build_diagnostics, read_results, write_reports
+from autocircuit.position_study import (
+    STUDY_VERSION,
+    decision_status,
+    generate_matched_position_dataset,
+    json_has_only_finite_numbers,
+    paired_position_effects,
+    position_metrics,
+    secondary_summaries,
+    validate_matched_dataset,
+    validate_scoring_identity,
+    write_dataset,
+)
 from autocircuit.runtime import select_device
 
 
@@ -126,7 +138,221 @@ def verify_resume(path: Path, expected_hash: str) -> None:
 
 
 def _json(path: Path, value: Any) -> None:
-    path.write_bytes((json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    path.write_bytes(
+        (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
+
+
+def _position_fingerprint_components(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "study_version": STUDY_VERSION,
+        "model": args.model,
+        "revision": args.revision,
+        "device": args.device,
+        "batch_size": args.batch_size,
+        "seed": args.seed,
+    }
+
+
+def _position_fingerprint(args: argparse.Namespace) -> str:
+    return hashlib.sha256(
+        json.dumps(_position_fingerprint_components(args), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _validate_position_contract(root: Path, state: dict[str, Any]) -> None:
+    """Reject resumable artifacts that belong to another study contract."""
+    if state.get("study_version") != STUDY_VERSION:
+        raise RuntimeError("resume study version does not match the current study contract")
+    if "matched_dataset.jsonl" in state.get("artifact_hashes", {}):
+        dataset = read_jsonl(root / "matched_dataset.jsonl")
+        versions = {item.metadata.get("generator_version") for item in dataset}
+        if versions != {STUDY_VERSION}:
+            raise RuntimeError("resumed dataset belongs to another generator version")
+    if "balance_report.json" in state.get("artifact_hashes", {}):
+        balance = json.loads((root / "balance_report.json").read_text(encoding="utf-8"))
+        if balance.get("generator_version") != STUDY_VERSION:
+            raise RuntimeError("resumed balance report belongs to another generator version")
+
+
+def run_position_study(
+    args: argparse.Namespace, adapter_factory: Callable[[str, str, str], Adapter] = PythiaAdapter
+) -> dict[str, Any]:
+    """Run the preregistered discovery-only matched-position experiment."""
+    if args.model != "pythia-70m":
+        raise ValueError("Pythia-70M is the only supported model")
+    root = args.output / f"seed-{args.seed}-{args.revision.replace('/', '_')}"
+    fingerprint = _position_fingerprint(args)
+    if root.exists() and not (args.resume or args.force):
+        raise RuntimeError(f"output exists: {root}; use --resume or --force")
+    if root.exists() and args.resume:
+        manifest_path = root / "run_manifest.json"
+        if not manifest_path.is_file():
+            raise RuntimeError("resume requested but run manifest is missing")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("study_version") != STUDY_VERSION:
+            raise RuntimeError("resume study version does not match the current study contract")
+        if manifest.get("input_fingerprint_components") != _position_fingerprint_components(args):
+            raise RuntimeError("resume fingerprint components do not match the study contract")
+        if manifest.get("input_fingerprint") != fingerprint:
+            raise RuntimeError("resume inputs do not match the recorded command/model")
+        _validate_checkpoints(root, manifest)
+        _validate_position_contract(root, manifest)
+        if manifest.get("complete") is True:
+            final: dict[str, Any] = json.loads(
+                (root / "final_status.json").read_text(encoding="utf-8")
+            )
+            print(f"Position study resumed: {final['status']}")
+            print(f"Artifacts: {root}")
+            return final
+        state = manifest
+    else:
+        state = {
+            "schema_version": 1,
+            "study_version": STUDY_VERSION,
+            "input_fingerprint": fingerprint,
+            "input_fingerprint_components": _position_fingerprint_components(args),
+            "artifact_hashes": {},
+            "complete": False,
+        }
+    if args.force and root.exists():
+        import shutil
+
+        shutil.rmtree(root)
+        state = {
+            "schema_version": 1,
+            "study_version": STUDY_VERSION,
+            "input_fingerprint": fingerprint,
+            "input_fingerprint_components": _position_fingerprint_components(args),
+            "artifact_hashes": {},
+            "complete": False,
+        }
+    root.mkdir(parents=True, exist_ok=True)
+    _json(root / "run_manifest.json", state)
+    adapter = adapter_factory(args.model, args.revision, args.device)
+
+    dataset_path = root / "matched_dataset.jsonl"
+    if "matched_dataset.jsonl" in state["artifact_hashes"]:
+        examples = read_jsonl(dataset_path)
+    else:
+        examples = generate_matched_position_dataset(adapter.tokenizer, args.seed)
+        write_dataset(dataset_path, examples)
+        _checkpoint(root, state, dataset_path)
+    # This is intentionally immediately before scoring, and raises on any mismatch.
+    balance = validate_matched_dataset(examples, adapter.tokenizer)
+    balance_path = root / "balance_report.json"
+    _json(balance_path, balance)
+    _checkpoint(root, state, balance_path)
+
+    records_path = root / "examples.jsonl"
+    if "examples.jsonl" in state["artifact_hashes"]:
+        records = read_results(records_path)
+    else:
+        records = adapter.score(examples, args.batch_size)
+        validate_scoring_identity(examples, records)
+        write_example_results(records_path, records)
+        _checkpoint(root, state, records_path)
+    validate_scoring_identity(examples, records)
+    metrics = position_metrics(records)
+    effects = paired_position_effects(records, seed=args.seed)
+    secondary = secondary_summaries(records)
+    metrics_path = root / "position_metrics.json"
+    effects_path = root / "paired_position_effects.json"
+    _json(metrics_path, metrics)
+    _checkpoint(root, state, metrics_path)
+    _json(effects_path, effects)
+    _checkpoint(root, state, effects_path)
+    secondary_path = root / "secondary_summaries.json"
+    _json(secondary_path, secondary)
+    _checkpoint(root, state, secondary_path)
+    status = decision_status(metrics, effects, balance)
+    final = {
+        "status": status,
+        "software_success": True,
+        "scientific_eligibility": status.startswith("QUERY_FIRST"),
+        "held_out_splits_opened": False,
+        "activation_patching_performed": False,
+    }
+    report_lines = [
+        "# Matched position discovery study",
+        "",
+        "## Preregistered primary results",
+        "",
+        f"**Decision status:** `{status}`",
+        "",
+        "| Position | Clean acc. | Corrupt acc. | Clean LD | Corrupt LD | Contrast | "
+        "Joint | Examples | Failed |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for position in ("first", "interior", "last"):
+        row = metrics[position]
+        if row["example_count"]:
+            report_lines.append(
+                f"| {position} | {row['clean_pairwise_accuracy']:.6f} | "
+                f"{row['corrupt_pairwise_accuracy']:.6f} | "
+                f"{row['mean_clean_logit_difference']:.6f} | "
+                f"{row['mean_corrupt_logit_difference']:.6f} | "
+                f"{row['clean_corrupt_contrast']:.6f} | {row['joint_success_rate']:.6f} | "
+                f"{row['example_count']} | {row['failed_count']} |"
+            )
+        else:
+            report_lines.append(
+                f"| {position} | n/a | n/a | n/a | n/a | n/a | n/a | 0 | "
+                f"{row['failed_count']} |"
+            )
+    report_lines += [
+        "",
+        "The paired estimates and deterministic 95% family-bootstrap intervals are in "
+        "`paired_position_effects.json`; the resampling unit is `matched_family_id`.",
+        "",
+        "## Secondary lexical/entity summaries",
+        "",
+        "Target, distractor, ordered-pair, and query-entity population summaries are reported "
+        "in `balance_report.json`. These summaries are secondary and do not alter the "
+        "decision rule.",
+        "",
+        "Descriptive performance by target token, distractor token, and query entity is in "
+        "`secondary_summaries.json`, including counts, accuracies, logit differences, and "
+        "contrasts. These results are secondary and never enter eligibility.",
+        "",
+        "## Software and scientific status",
+        "",
+        "- Software success: **yes** (scientific failure is a successful software outcome).",
+        f"- Scientific eligibility: **{'yes' if final['scientific_eligibility'] else 'no'}**.",
+        "- Held-out validation and test splits were **not opened**.",
+        "- Activation patching was not performed.",
+    ]
+    report_path = root / "position_study.md"
+    report_path.write_bytes(("\n".join(report_lines) + "\n").encode())
+    _checkpoint(root, state, report_path)
+    final_path = root / "final_status.json"
+    _json(final_path, final)
+    _checkpoint(root, state, final_path)
+    if not json_has_only_finite_numbers(
+        {"metrics": metrics, "effects": effects, "secondary": secondary}
+    ):
+        raise RuntimeError("non-finite value in JSON output")
+    state |= {
+        "complete": True,
+        "git_commit": _git_commit(),
+        "model_id": adapter.model_id,
+        "tokenizer_id": adapter.tokenizer_id,
+        "requested_revision": args.revision,
+        "resolved_revision": adapter.resolved_revision,
+        "device": adapter.device,
+        "dtype": adapter.dtype,
+        "expected_example_count": 360,
+        "processed_example_count": len(records),
+        "command_arguments": {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(args).items()
+        },
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    _json(root / "run_manifest.json", state)
+    print(f"Position study: {status}")
+    print(f"Artifacts: {root}")
+    return final
 
 
 def _fingerprint(args: argparse.Namespace, config_hash: str) -> str:
@@ -482,6 +708,18 @@ def build_parser() -> argparse.ArgumentParser:
     reuse = discovery.add_mutually_exclusive_group()
     reuse.add_argument("--resume", action="store_true")
     reuse.add_argument("--force", action="store_true")
+    position = commands.add_parser(
+        "position-study", help="run the discovery-only matched query-position study"
+    )
+    position.add_argument("--model", default="pythia-70m", choices=["pythia-70m"])
+    position.add_argument("--revision", default="main")
+    position.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    position.add_argument("--batch-size", type=int, default=8)
+    position.add_argument("--seed", type=int, default=42)
+    position.add_argument("--output", type=Path, default=Path("artifacts/position_study"))
+    position_reuse = position.add_mutually_exclusive_group()
+    position_reuse.add_argument("--resume", action="store_true")
+    position_reuse.add_argument("--force", action="store_true")
     return parser
 
 
@@ -491,7 +729,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.batch_size <= 0 or args.seed < 0:
         parser.error("batch size must be positive and seed non-negative")
     try:
-        run_discovery(args)
+        if args.command == "position-study":
+            run_position_study(args)
+        else:
+            run_discovery(args)
     except Exception as exc:
         print(f"SOFTWARE FAILURE: {exc}", file=sys.stderr)
         return 1
