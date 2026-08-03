@@ -144,14 +144,18 @@ class FakeHookModel:
 
 
 def tiny_pairs() -> list[FirstLastPair]:
-    return [
-        FirstLastPair(
-            family_id=f"family-{family}",
-            first=make_example(family, "first"),
-            last=make_example(family, "last"),
+    pairs: list[FirstLastPair] = []
+    for family in range(2):
+        first = make_example(family, "first")
+        last = make_example(family, "last")
+        pairs.append(
+            FirstLastPair(
+                family_id=first.family_id,
+                first=first,
+                last=last,
+            )
         )
-        for family in range(2)
-    ]
+    return pairs
 
 
 def test_bidirectional_scan_localizes_the_late_residual_boundary() -> None:
@@ -165,7 +169,11 @@ def test_bidirectional_scan_localizes_the_late_residual_boundary() -> None:
         and record.direction == "first_to_last"
         and record.source_mode == "matched"
     ]
-    by_site = {record.site: record for record in matched_clean_forward if record.family_id == "family-0"}
+    by_site = {
+        record.site: record
+        for record in matched_clean_forward
+        if record.family_id == "family-000"
+    }
     assert by_site["blocks.0.hook_resid_pre"].causal_transfer == pytest.approx(0.0)
     assert by_site["blocks.1.hook_resid_pre"].causal_transfer == pytest.approx(2.0)
     assert by_site["blocks.1.hook_resid_post"].causal_transfer == pytest.approx(3.0)
