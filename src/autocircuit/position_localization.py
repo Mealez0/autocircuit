@@ -1,9 +1,7 @@
 """Exploratory causal localization for the matched query-position effect.
 
-This module deliberately uses only the frozen discovery population. It performs
-family-matched activation patching from first to last query position and the
-reverse direction at residual-stream layer boundaries. The untouched test split
-is never resolved, generated, read, or scored.
+Only the frozen discovery population is used. The untouched test split is never
+resolved, generated, read, or scored by this module.
 """
 
 from __future__ import annotations
@@ -94,23 +92,23 @@ def build_first_last_pairs(examples: list[ExamplePair]) -> list[FirstLastPair]:
         raise ValueError("localization requires exactly 120 matched families")
 
     pairs: list[FirstLastPair] = []
+    invariant_fields = (
+        "family_id",
+        "split",
+        "target_text",
+        "distractor_text",
+        "target_token_id",
+        "distractor_token_id",
+        "changed_factor",
+        "seed",
+        "template_id",
+    )
     for family_id in sorted(families):
         variants = families[family_id]
         if set(variants) != set(POSITIONS):
             raise ValueError("localization family does not contain all three positions")
         first = variants["first"]
         last = variants["last"]
-        invariant_fields = (
-            "family_id",
-            "split",
-            "target_text",
-            "distractor_text",
-            "target_token_id",
-            "distractor_token_id",
-            "changed_factor",
-            "seed",
-            "template_id",
-        )
         if any(getattr(first, field) != getattr(last, field) for field in invariant_fields):
             raise ValueError("first and last variants do not share the same task identity")
         first_length = first.metadata.get("prompt_token_length")
@@ -140,7 +138,9 @@ def _task_scores(logits: Any, items: list[ExamplePair], variant: str) -> Any:
 
     rows = torch.arange(len(items), device=logits.device)
     targets = torch.tensor(
-        [item.target_token_id for item in items], device=logits.device, dtype=torch.long
+        [item.target_token_id for item in items],
+        device=logits.device,
+        dtype=torch.long,
     )
     distractors = torch.tensor(
         [item.distractor_token_id for item in items],
@@ -209,11 +209,14 @@ def run_residual_stream_scan(
                             names_filter=sites,
                         )
                         destination_logits = model(
-                            destination_prompts, return_type="logits"
+                            destination_prompts,
+                            return_type="logits",
                         )
                         source_scores = _task_scores(source_logits, source_items, variant)
                         destination_scores = _task_scores(
-                            destination_logits, destination_items, variant
+                            destination_logits,
+                            destination_items,
+                            variant,
                         )
                         for site_index, site in enumerate(sites):
                             source_activation = source_cache[site]
@@ -221,9 +224,15 @@ def run_residual_stream_scan(
                             for source_mode in modes:
                                 if source_mode == "matched":
                                     patch_source = source_activation
-                                    source_family_ids = [item.family_id for item in source_items]
+                                    source_family_ids = [
+                                        item.family_id for item in source_items
+                                    ]
                                 else:
-                                    patch_source = torch.roll(source_activation, shifts=1, dims=0)
+                                    patch_source = torch.roll(
+                                        source_activation,
+                                        shifts=1,
+                                        dims=0,
+                                    )
                                     source_family_ids = [source_items[-1].family_id] + [
                                         item.family_id for item in source_items[:-1]
                                     ]
@@ -235,7 +244,9 @@ def run_residual_stream_scan(
                                     ],
                                 )
                                 patched_scores = _task_scores(
-                                    patched_logits, destination_items, variant
+                                    patched_logits,
+                                    destination_items,
+                                    variant,
                                 )
                                 for row, destination in enumerate(destination_items):
                                     source_score = float(source_scores[row])
@@ -252,18 +263,22 @@ def run_residual_stream_scan(
                                         if abs(available_gap) > 1e-12
                                         else None
                                     )
-                                    values = (
+                                    finite_values = (
                                         source_score,
                                         destination_score,
                                         patched_score,
                                         available_gap,
                                         causal_transfer,
                                     )
-                                    if not all(math.isfinite(value) for value in values):
+                                    if not all(
+                                        math.isfinite(value) for value in finite_values
+                                    ):
                                         raise RuntimeError(
                                             "non-finite value in localization record"
                                         )
-                                    if normalized is not None and not math.isfinite(normalized):
+                                    if normalized is not None and not math.isfinite(
+                                        normalized
+                                    ):
                                         raise RuntimeError(
                                             "non-finite normalized localization record"
                                         )
@@ -300,7 +315,9 @@ def _group_seed(seed: int, key: str) -> int:
 
 
 def _bootstrap_mean_interval(
-    values: list[float], samples: int, seed: int
+    values: list[float],
+    samples: int,
+    seed: int,
 ) -> list[float]:
     import torch
 
@@ -308,15 +325,22 @@ def _bootstrap_mean_interval(
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
     indexes = torch.randint(
-        len(values), (samples, len(values)), generator=generator, device="cpu"
+        len(values),
+        (samples, len(values)),
+        generator=generator,
+        device="cpu",
     )
     means = tensor[indexes].mean(dim=1)
-    quantiles = torch.quantile(means, torch.tensor([0.025, 0.975]))
+    levels = torch.tensor([0.025, 0.975], dtype=tensor.dtype)
+    quantiles = torch.quantile(means, levels)
     return [float(quantiles[0]), float(quantiles[1])]
 
 
 def _bootstrap_ratio_interval(
-    numerators: list[float], denominators: list[float], samples: int, seed: int
+    numerators: list[float],
+    denominators: list[float],
+    samples: int,
+    seed: int,
 ) -> list[float] | None:
     import torch
 
@@ -336,7 +360,8 @@ def _bootstrap_ratio_interval(
     ratios = numerator_means[valid] / denominator_means[valid]
     if int(ratios.numel()) < max(100, samples // 2):
         return None
-    quantiles = torch.quantile(ratios, torch.tensor([0.025, 0.975]))
+    levels = torch.tensor([0.025, 0.975], dtype=ratios.dtype)
+    quantiles = torch.quantile(ratios, levels)
     return [float(quantiles[0]), float(quantiles[1])]
 
 
@@ -351,13 +376,14 @@ def summarize_layer_scan(
         raise ValueError("bootstrap sample count must be positive")
     groups: dict[tuple[str, str, str, str], list[LayerScanRecord]] = defaultdict(list)
     for record in records:
-        key = (
-            record.prompt_variant,
-            record.direction,
-            record.source_mode,
-            record.site,
-        )
-        groups[key].append(record)
+        groups[
+            (
+                record.prompt_variant,
+                record.direction,
+                record.source_mode,
+                record.site,
+            )
+        ].append(record)
 
     rows: list[dict[str, Any]] = []
     for key in sorted(groups):
@@ -405,29 +431,26 @@ def summarize_layer_scan(
             }
         )
 
-    by_site: dict[str, dict[str, list[float] | int]] = defaultdict(
-        lambda: {"matched": [], "permuted": [], "site_index": 0}
-    )
+    site_indices: dict[str, int] = {}
+    matched_by_site: dict[str, list[float]] = defaultdict(list)
+    permuted_by_site: dict[str, list[float]] = defaultdict(list)
     for row in rows:
         site = str(row["site"])
-        source_mode = str(row["source_mode"])
-        by_site[site]["site_index"] = int(row["site_index"])
-        values = by_site[site][source_mode]
-        assert isinstance(values, list)
-        values.append(float(row["mean_causal_transfer"]))
+        site_indices[site] = int(row["site_index"])
+        if row["source_mode"] == "matched":
+            matched_by_site[site].append(float(row["mean_causal_transfer"]))
+        else:
+            permuted_by_site[site].append(float(row["mean_causal_transfer"]))
 
     ranking: list[dict[str, Any]] = []
-    for site, values in by_site.items():
-        matched_values = values["matched"]
-        permuted_values = values["permuted"]
-        assert isinstance(matched_values, list)
-        assert isinstance(permuted_values, list)
-        matched_mean = _mean(matched_values)
+    for site in sorted(site_indices, key=site_indices.get):
+        matched_mean = _mean(matched_by_site[site])
+        permuted_values = permuted_by_site.get(site, [])
         permuted_mean = _mean(permuted_values) if permuted_values else 0.0
         ranking.append(
             {
                 "site": site,
-                "site_index": int(values["site_index"]),
+                "site_index": site_indices[site],
                 "matched_mean_causal_transfer": matched_mean,
                 "permuted_mean_causal_transfer": permuted_mean,
                 "family_specific_transfer_advantage": matched_mean - permuted_mean,
@@ -476,8 +499,8 @@ def _write_report(path: Path, summary: dict[str, Any]) -> None:
         "",
         f"**Status:** `{LOCALIZATION_STATUS}`",
         "",
-        "This scan patches the final query-token residual stream between matched first and ",
-        "last query-position prompts. It is exploratory and uses only the frozen discovery ",
+        "This scan patches the final query-token residual stream between matched first and",
+        "last query-position prompts. It is exploratory and uses only the frozen discovery",
         "population. It does not constitute circuit confirmation.",
         "",
         "## Candidate residual boundaries",
@@ -505,7 +528,7 @@ def _write_report(path: Path, summary: dict[str, Any]) -> None:
         "- Activation patching performed: **yes**.",
         "- Circuit found or confirmed: **no**.",
         "",
-        "The ranking is a candidate-localization output. Head, MLP, edge, ablation, null, ",
+        "The ranking is a candidate-localization output. Head, MLP, edge, ablation, null,",
         "and final test controls are still required before making a circuit claim.",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -560,7 +583,11 @@ def run_localization(
     }
     _write_json(manifest_path, manifest)
 
-    adapter = adapter_factory(str(contract["model"]), str(contract["load_revision"]), args.device)
+    adapter = adapter_factory(
+        str(contract["model"]),
+        str(contract["load_revision"]),
+        args.device,
+    )
     model_identity = _verify_validation_adapter(adapter, contract)
     examples = read_jsonl(args.discovery_root / "matched_dataset.jsonl")
     pairs = build_first_last_pairs(examples)
@@ -580,7 +607,9 @@ def run_localization(
         "scientific_confirmation": False,
         "interpretation_scope": "exploratory_discovery_only",
         "matched_family_count": len(pairs),
-        "residual_boundary_count": len(residual_stream_sites(int(adapter.model.cfg.n_layers))),
+        "residual_boundary_count": len(
+            residual_stream_sites(int(adapter.model.cfg.n_layers))
+        ),
         "record_count": len(records),
         "held_out_validation_reused": False,
         "held_out_test_opened": False,
@@ -621,7 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("artifacts/position_study/seed-42-main"),
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("artifacts/position_localization")
+        "--output",
+        type=Path,
+        default=Path("artifacts/position_localization"),
     )
     reuse = parser.add_mutually_exclusive_group()
     reuse.add_argument("--resume", action="store_true")
