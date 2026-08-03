@@ -443,7 +443,7 @@ def summarize_layer_scan(
             permuted_by_site[site].append(float(row["mean_causal_transfer"]))
 
     ranking: list[dict[str, Any]] = []
-    for site in sorted(site_indices, key=site_indices.get):
+    for site in sorted(site_indices, key=lambda name: site_indices[name]):
         matched_mean = _mean(matched_by_site[site])
         permuted_values = permuted_by_site.get(site, [])
         permuted_mean = _mean(permuted_values) if permuted_values else 0.0
