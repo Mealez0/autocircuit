@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import hashlib
 import json
 from collections import Counter, defaultdict
 from dataclasses import replace
@@ -14,6 +15,7 @@ from autocircuit.baseline import make_example_result, make_failed_result
 from autocircuit.datasets.associative_recall import ENTITIES, VALUES, ExamplePair
 from autocircuit.position_study import (
     FAMILY_COUNT,
+    STUDY_VERSION,
     decision_status,
     generate_matched_position_dataset,
     paired_position_effects,
@@ -310,17 +312,51 @@ def test_offline_run_outputs_resume_force_and_no_heldout_access(
         "final_status.json",
     }
     assert expected <= {path.name for path in root.iterdir()}
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    balance = json.loads((root / "balance_report.json").read_text())
+    dataset_rows = [
+        json.loads(line)
+        for line in (root / "matched_dataset.jsonl").read_text().splitlines()
+    ]
+    assert manifest["study_version"] == STUDY_VERSION
+    assert manifest["input_fingerprint_components"]["study_version"] == STUDY_VERSION
+    assert manifest["input_fingerprint"] == pipeline._position_fingerprint(args(tmp_path))
+    assert balance["generator_version"] == STUDY_VERSION
+    assert {row["metadata"]["generator_version"] for row in dataset_rows} == {STUDY_VERSION}
     for path in root.glob("*.json"):
         assert "NaN" not in path.read_text() and "Infinity" not in path.read_text()
     resumed = args(tmp_path, resume=True)
     assert pipeline.run_position_study(
         resumed, lambda *unused: (_ for _ in ()).throw(AssertionError("model reloaded"))
     ) == final
+    original_manifest = manifest_path.read_bytes()
+    for complete in (False, True):
+        wrong_manifest = manifest | {"study_version": "position-study-1.0.0", "complete": complete}
+        manifest_path.write_text(json.dumps(wrong_manifest, sort_keys=True) + "\n")
+        with pytest.raises(RuntimeError, match="study version"):
+            pipeline.run_position_study(resumed, lambda *unused: FakeAdapter())
+    manifest_path.write_bytes(original_manifest)
     dataset = root / "matched_dataset.jsonl"
     dataset.write_bytes(dataset.read_bytes() + b"tamper")
     with pytest.raises(RuntimeError, match="hash verification"):
         pipeline.run_position_study(resumed, lambda *unused: FakeAdapter())
     pipeline.run_position_study(args(tmp_path, force=True), lambda *unused: FakeAdapter())
+    dataset = root / "matched_dataset.jsonl"
+    old_rows = [json.loads(line) for line in dataset.read_text().splitlines()]
+    for row in old_rows:
+        row["metadata"]["generator_version"] = "position-study-1.0.0"
+    dataset.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in old_rows)
+    )
+    manifest_path = root / "run_manifest.json"
+    old_artifact_manifest = json.loads(manifest_path.read_text())
+    old_artifact_manifest["artifact_hashes"]["matched_dataset.jsonl"] = hashlib.sha256(
+        dataset.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(old_artifact_manifest, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(RuntimeError, match="another generator version"):
+        pipeline.run_position_study(resumed, lambda *unused: FakeAdapter())
     summaries = secondary_summaries(
         FakeAdapter().score(generate_matched_position_dataset(FakeTokenizer()), 8)
     )
@@ -359,3 +395,4 @@ def test_missing_last_result_is_software_integrity_failure(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="exactly match"):
         pipeline.run_position_study(args(tmp_path), lambda *unused: MissingAdapter())
+    assert not (tmp_path / "seed-42-main" / "examples.jsonl").exists()

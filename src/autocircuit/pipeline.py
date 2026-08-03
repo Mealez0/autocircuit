@@ -45,6 +45,7 @@ from autocircuit.datasets.associative_recall import (
 )
 from autocircuit.diagnostics import build_diagnostics, read_results, write_reports
 from autocircuit.position_study import (
+    STUDY_VERSION,
     decision_status,
     generate_matched_position_dataset,
     json_has_only_finite_numbers,
@@ -142,16 +143,36 @@ def _json(path: Path, value: Any) -> None:
     )
 
 
-def _position_fingerprint(args: argparse.Namespace) -> str:
-    value = {
-        "study": "matched-position-v1",
+def _position_fingerprint_components(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "study_version": STUDY_VERSION,
         "model": args.model,
         "revision": args.revision,
         "device": args.device,
         "batch_size": args.batch_size,
         "seed": args.seed,
     }
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _position_fingerprint(args: argparse.Namespace) -> str:
+    return hashlib.sha256(
+        json.dumps(_position_fingerprint_components(args), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _validate_position_contract(root: Path, state: dict[str, Any]) -> None:
+    """Reject resumable artifacts that belong to another study contract."""
+    if state.get("study_version") != STUDY_VERSION:
+        raise RuntimeError("resume study version does not match the current study contract")
+    if "matched_dataset.jsonl" in state.get("artifact_hashes", {}):
+        dataset = read_jsonl(root / "matched_dataset.jsonl")
+        versions = {item.metadata.get("generator_version") for item in dataset}
+        if versions != {STUDY_VERSION}:
+            raise RuntimeError("resumed dataset belongs to another generator version")
+    if "balance_report.json" in state.get("artifact_hashes", {}):
+        balance = json.loads((root / "balance_report.json").read_text(encoding="utf-8"))
+        if balance.get("generator_version") != STUDY_VERSION:
+            raise RuntimeError("resumed balance report belongs to another generator version")
 
 
 def run_position_study(
@@ -169,9 +190,14 @@ def run_position_study(
         if not manifest_path.is_file():
             raise RuntimeError("resume requested but run manifest is missing")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("study_version") != STUDY_VERSION:
+            raise RuntimeError("resume study version does not match the current study contract")
+        if manifest.get("input_fingerprint_components") != _position_fingerprint_components(args):
+            raise RuntimeError("resume fingerprint components do not match the study contract")
         if manifest.get("input_fingerprint") != fingerprint:
             raise RuntimeError("resume inputs do not match the recorded command/model")
         _validate_checkpoints(root, manifest)
+        _validate_position_contract(root, manifest)
         if manifest.get("complete") is True:
             final: dict[str, Any] = json.loads(
                 (root / "final_status.json").read_text(encoding="utf-8")
@@ -183,8 +209,9 @@ def run_position_study(
     else:
         state = {
             "schema_version": 1,
-            "study": "matched-position-v1",
+            "study_version": STUDY_VERSION,
             "input_fingerprint": fingerprint,
+            "input_fingerprint_components": _position_fingerprint_components(args),
             "artifact_hashes": {},
             "complete": False,
         }
@@ -194,8 +221,9 @@ def run_position_study(
         shutil.rmtree(root)
         state = {
             "schema_version": 1,
-            "study": "matched-position-v1",
+            "study_version": STUDY_VERSION,
             "input_fingerprint": fingerprint,
+            "input_fingerprint_components": _position_fingerprint_components(args),
             "artifact_hashes": {},
             "complete": False,
         }
@@ -221,6 +249,7 @@ def run_position_study(
         records = read_results(records_path)
     else:
         records = adapter.score(examples, args.batch_size)
+        validate_scoring_identity(examples, records)
         write_example_results(records_path, records)
         _checkpoint(root, state, records_path)
     validate_scoring_identity(examples, records)

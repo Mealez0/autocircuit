@@ -16,7 +16,7 @@ from autocircuit.baseline import ExampleResult, successful_difference
 from autocircuit.datasets.associative_recall import ENTITIES, VALUES, ExamplePair
 from autocircuit.datasets.validation import Tokenizer, validate_answer_tokens
 
-GENERATOR_VERSION = "position-study-1.0.0"
+STUDY_VERSION = "position-study-2.0.0"
 FAMILY_COUNT = 120
 POSITIONS = ("first", "interior", "last")
 BOOTSTRAP_SAMPLES = 10_000
@@ -32,7 +32,7 @@ def generate_matched_position_dataset(
     tokenizer: Tokenizer, seed: int = 42
 ) -> list[ExamplePair]:
     """Generate 120 balanced families, each presented at all three positions."""
-    rng = random.Random(f"{GENERATOR_VERSION}:seed:{seed}")
+    rng = random.Random(f"{STUDY_VERSION}:seed:{seed}")
     values = list(VALUES[0])
     entities = list(ENTITIES[0])
     offsets = list(range(1, len(values)))
@@ -69,7 +69,7 @@ def generate_matched_position_dataset(
             (other_entities[1], values[third_index]),
         ]
         target_id, distractor_id = validate_answer_tokens(tokenizer, target, distractor)
-        provenance = f"{GENERATOR_VERSION}:{seed}:{target_index}:{query_index}"
+        provenance = f"{STUDY_VERSION}:{seed}:{target_index}:{query_index}"
         matched_id = "position-family-" + hashlib.sha256(provenance.encode()).hexdigest()[:16]
         orders = ((0, 1, 2), (1, 0, 2), (1, 2, 0))
         for position_index, (position, order) in enumerate(zip(POSITIONS, orders, strict=True)):
@@ -104,7 +104,7 @@ def generate_matched_position_dataset(
                         "query_fact_index": position_index,
                         "normalized_query_position": position,
                         "prompt_token_length": clean_length,
-                        "generator_version": GENERATOR_VERSION,
+                        "generator_version": STUDY_VERSION,
                         "ordering": list(order),
                     },
                 )
@@ -136,6 +136,8 @@ def validate_matched_dataset(examples: list[ExamplePair], tokenizer: Tokenizer) 
         if set(by_position) != set(POSITIONS) or len(variants) != 3:
             raise ValueError(f"family {family_id} lacks exactly one variant per position")
         first = by_position["first"]
+        if first.metadata.get("generator_version") != STUDY_VERSION:
+            raise ValueError("dataset generator version does not match the study contract")
         if first.template_id != "chooses-position-study-v1":
             raise ValueError("relation template must be exactly chooses")
         assignments = [tuple(item) for item in first.metadata.get("assignments", [])]
@@ -247,7 +249,7 @@ def validate_matched_dataset(examples: list[ExamplePair], tokenizer: Tokenizer) 
     }
     return {
         "all_invariants_passed": True,
-        "generator_version": GENERATOR_VERSION,
+        "generator_version": STUDY_VERSION,
         "example_count": len(examples),
         "matched_family_count": len(families),
         "target_counts": dict(sorted(targets.items())),
