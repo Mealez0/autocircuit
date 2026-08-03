@@ -154,8 +154,8 @@ def _task_scores(logits: Any, items: list[ExamplePair], variant: str) -> Any:
 def _patch_query_position(source: Any) -> Callable[[Any, Any], Any]:
     """Build a TransformerLens hook that patches only the final query position."""
 
-    def hook(value: Any, hook_point: Any) -> Any:
-        del hook_point
+    def hook(value: Any, hook: Any) -> Any:
+        del hook
         if value.shape != source.shape:
             raise RuntimeError("source and destination activation shapes differ")
         patched = value.clone()

@@ -138,7 +138,7 @@ class FakeHookModel:
         destination[:, -1, 0] = torch.tensor(
             [self._site_score(prompt, site) for prompt in prompts]
         )
-        patched = hook(destination, None)
+        patched = hook(destination, hook=None)
         scores = [float(value) for value in patched[:, -1, 0]]
         return self._logits(prompts, scores)
 
