@@ -149,6 +149,59 @@ def test_stable_observed_pair_promotes_necessity_followup() -> None:
     assert plan["proposals"][0]["trigger"] == "observed_pair_ci_lower_bound_positive"
 
 
+def test_necessity_followups_are_bounded_and_ranked_by_stability() -> None:
+    pair_results = [
+        {
+            "pair": [3, 6],
+            "family_specific_advantage": 0.159,
+            "family_specific_advantage_ci_95": [0.130, 0.189],
+        },
+        {
+            "pair": [1, 3],
+            "family_specific_advantage": 0.120,
+            "family_specific_advantage_ci_95": [0.090, 0.150],
+        },
+        {
+            "pair": [0, 6],
+            "family_specific_advantage": 0.110,
+            "family_specific_advantage_ci_95": [0.080, 0.145],
+        },
+    ]
+    plan = build_search_plan(
+        _head_summary(),
+        _component_summary(),
+        pair_results=pair_results,
+        policy=SearchPolicy(max_pair_proposals=4, max_necessity_proposals=2),
+    )
+
+    necessity = [
+        proposal for proposal in plan["proposals"] if proposal["kind"] == "pair_necessity"
+    ]
+    assert [proposal["heads"] for proposal in necessity] == [[3, 6], [1, 3]]
+    assert plan["search_space"]["stable_observed_pairs"] == 3
+    assert plan["search_space"]["proposed_necessity_followups"] == 2
+    assert plan["search_space"]["necessity_followups_deferred"] == 1
+
+
+def test_zero_necessity_budget_defers_stable_pair_followups() -> None:
+    pair_results = [
+        {
+            "pair": [3, 6],
+            "family_specific_advantage": 0.159,
+            "family_specific_advantage_ci_95": [0.130, 0.189],
+        }
+    ]
+    plan = build_search_plan(
+        _head_summary(),
+        _component_summary(),
+        pair_results=pair_results,
+        policy=SearchPolicy(max_necessity_proposals=0),
+    )
+
+    assert not any(proposal["kind"] == "pair_necessity" for proposal in plan["proposals"])
+    assert plan["search_space"]["necessity_followups_deferred"] == 1
+
+
 def test_uncertain_observed_pair_does_not_trigger_necessity_followup() -> None:
     pair_results = [
         {
