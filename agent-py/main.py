@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -11,7 +12,6 @@ from neuronpedia_agent.analysis.graph_analyzer import GraphAnalyzer
 from neuronpedia_agent.analysis.grouping_engine import GroupingEngine
 from neuronpedia_agent.analysis.node_selector import NodeSelector
 from neuronpedia_agent.api import NeuronpediaAPIError, NeuronpediaGraphClient
-from neuronpedia_agent.labeling.auto_labeler import AutoLabeler
 
 DEFAULT_MODEL = "google/gemma-2-2b"
 DEFAULT_API_URL = "http://localhost:5004"
@@ -20,6 +20,17 @@ DEFAULT_API_URL = "http://localhost:5004"
 @click.group()
 def cli() -> None:
     """Neuronpedia Attribution Graph Cleanup Automation Agent."""
+
+
+def _node_lookup(nodes: object) -> dict[str, dict[str, Any]]:
+    if not isinstance(nodes, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict) or "id" not in node:
+            continue
+        result[str(node["id"])] = node
+    return result
 
 
 def _clean_graph_file(
@@ -52,9 +63,20 @@ def _clean_graph_file(
     click.echo(f"Created {len(supernodes)} supernodes using {grouping} grouping")
 
     if anthropic_api_key:
-        labeler = AutoLabeler(api_key=anthropic_api_key)
-        for supernode in supernodes:
-            supernode.label = labeler.generate_label(supernode, graph_data, prompt="", target_logit="")
+        try:
+            from neuronpedia_agent.labeling.auto_labeler import AutoLabeler
+
+            labeler = AutoLabeler(api_key=anthropic_api_key)
+            node_data = _node_lookup(nodes)
+            for supernode in supernodes:
+                supernode.label = labeler.generate_label(
+                    supernode,
+                    node_data,
+                    prompt="",
+                    target_logit="",
+                )
+        except Exception as exc:
+            raise click.ClickException(f"LLM labeling failed: {exc}") from exc
 
     output_data: dict[str, object] = {
         "pinned_node_ids": pinned_nodes,
