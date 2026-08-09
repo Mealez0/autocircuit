@@ -1,3 +1,5 @@
-"""API client modules (to be implemented)"""
+"""Neuronpedia API transport primitives."""
 
-# TODO: Implement API client and schemas
+from .client import GeneratedGraph, NeuronpediaAPIError, NeuronpediaGraphClient
+
+__all__ = ["GeneratedGraph", "NeuronpediaAPIError", "NeuronpediaGraphClient"]
