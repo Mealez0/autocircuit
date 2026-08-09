@@ -25,6 +25,7 @@ class SearchPolicy:
     max_pair_proposals: int = 8
     exploration_pair_proposals: int = 2
     max_path_proposals: int = 2
+    max_necessity_proposals: int = 2
     uncertainty_weight: float = 0.5
 
     def __post_init__(self) -> None:
@@ -32,6 +33,7 @@ class SearchPolicy:
             "max_pair_proposals": self.max_pair_proposals,
             "exploration_pair_proposals": self.exploration_pair_proposals,
             "max_path_proposals": self.max_path_proposals,
+            "max_necessity_proposals": self.max_necessity_proposals,
         }
         for name, value in integer_fields.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -298,7 +300,10 @@ def _pair_proposal(
     }
 
 
-def _necessity_followups(observations: Sequence[PairObservation]) -> list[dict[str, Any]]:
+def _necessity_followups(
+    observations: Sequence[PairObservation], count: int
+) -> list[dict[str, Any]]:
+    stable = [item for item in observations if item.stable_positive]
     return [
         {
             "proposal_id": f"leave_pair_out_{item.pair[0]}_{item.pair[1]}",
@@ -312,10 +317,8 @@ def _necessity_followups(observations: Sequence[PairObservation]) -> list[dict[s
                 "family_specific_advantage_ci_95": [item.ci_low, item.ci_high],
             },
         }
-        for item in observations
-        if item.stable_positive
+        for item in stable[:count]
     ]
-
 
 def _path_proposals(
     ranked_heads: Sequence[HeadEvidence],
@@ -397,7 +400,10 @@ def build_search_plan(
 
     mlp_advantage = _component_advantage(component_summary, "mlp_output")
     attention_advantage = _component_advantage(component_summary, "attention_output")
-    followups = _necessity_followups(observations)
+    stable_observed_count = sum(item.stable_positive for item in observations)
+    followups = _necessity_followups(
+        observations, selected_policy.max_necessity_proposals
+    )
     exploit_proposals = [
         _pair_proposal(pair, "exploit", evidence_by_head) for pair in exploit_pairs
     ]
@@ -429,11 +435,15 @@ def build_search_plan(
             "max_pair_proposals": selected_policy.max_pair_proposals,
             "exploration_pair_proposals": selected_policy.exploration_pair_proposals,
             "max_path_proposals": selected_policy.max_path_proposals,
+            "max_necessity_proposals": selected_policy.max_necessity_proposals,
             "uncertainty_weight": selected_policy.uncertainty_weight,
         },
         "search_space": {
             "all_possible_head_pairs": len(all_pairs),
             "observed_head_pairs": len(observed_pairs),
+            "stable_observed_pairs": stable_observed_count,
+            "proposed_necessity_followups": len(followups),
+            "necessity_followups_deferred": stable_observed_count - len(followups),
             "proposed_head_pairs": proposed_pair_count,
             "pair_interventions_avoided_this_plan": len(all_pairs)
             - len(observed_pairs)

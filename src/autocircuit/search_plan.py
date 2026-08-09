@@ -126,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pair-proposals", type=int, default=8)
     parser.add_argument("--exploration-pair-proposals", type=int, default=2)
     parser.add_argument("--max-path-proposals", type=int, default=2)
+    parser.add_argument("--max-necessity-proposals", type=int, default=2)
     parser.add_argument("--uncertainty-weight", type=float, default=0.5)
     parser.add_argument("--force", action="store_true")
     return parser
@@ -139,6 +140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pair_proposals=args.max_pair_proposals,
             exploration_pair_proposals=args.exploration_pair_proposals,
             max_path_proposals=args.max_path_proposals,
+            max_necessity_proposals=args.max_necessity_proposals,
             uncertainty_weight=args.uncertainty_weight,
         )
         plan = generate_search_plan(
