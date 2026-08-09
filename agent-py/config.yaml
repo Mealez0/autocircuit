@@ -1,57 +1,36 @@
+# Reference defaults for the legacy-compatible agent CLI.
+# Runtime values are supplied by CLI flags / environment variables; this file is
+# intentionally not auto-loaded so secrets cannot be picked up accidentally.
+
 api:
-  base_url: "https://neuronpedia.org/api"
-  timeout: 60
-  retry_attempts: 3
+  base_url: "http://localhost:5004"
+  auth_header: "x-secret-key"
+  timeout_seconds: 600
+  retry_attempts: 0
 
 models:
-  default: "gemma-2-2b"
-  supported:
-    - "gemma-2-2b"
-    - "llama-3.2-1b"
+  default: "google/gemma-2-2b"
+  examples:
+    - "google/gemma-2-2b"
+    - "Qwen/Qwen3-4B"
+    - "Qwen/Qwen3-1.7B"  # CRM backend configuration
 
 graph_generation:
-  node_threshold: 0.8      # Keep nodes accounting for 80% of influence
-  edge_threshold: 0.98     # Keep edges accounting for 98% of influence
+  batch_size: 48
+  max_n_logits: 10
+  desired_logit_prob: 0.95
+  node_threshold: 0.8
+  edge_threshold: 0.85
+  max_feature_nodes: 5000
 
 node_selection:
-  max_nodes: 30            # Maximum nodes to pin
-  min_importance: 0.1      # Minimum importance score to consider
-
-  pathway_strategy:
-    num_target_logits: 5   # Consider top 5 output logits
-    min_path_influence: 0.05  # Only trace paths with >5% influence
-
-  balanced_strategy:
-    input_features_pct: 0.30   # 30% from early layers
-    middle_features_pct: 0.40  # 40% from middle layers
-    output_features_pct: 0.30  # 30% from late layers
+  max_nodes: 30
+  strategy: "pathway"
 
 grouping:
-  min_group_size: 2        # Minimum nodes per supernode
-  max_group_size: 8        # Maximum nodes per supernode
-  target_num_groups: 5     # Aim for ~5 supernodes
-
-  functional_classification:
-    input_detector_layer_max: 5
-    output_promoter_layer_min: 16
-    min_logit_influence: 0.1  # For output promoter classification
-
-  semantic_clustering:
-    similarity_threshold: 0.7  # Cosine similarity for grouping
-    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  strategy: "functional"
+  # semantic/layer/hybrid currently fall back to functional grouping.
 
 labeling:
-  model: "claude-sonnet-4-20250514"
-  max_tokens: 50
-  temperature: 0.7
-  max_label_words: 5
-
-metrics:
-  min_replacement_score: 0.5
-  min_completeness_score: 0.7
-  ideal_num_supernodes: [3, 7]  # Range for interpretability
-
-logging:
-  level: "INFO"
-  file: "neuronpedia_agent.log"
-  console: true
+  enabled_by_default: false
+  # Install requirements-labeling.txt and set ANTHROPIC_API_KEY to opt in.
