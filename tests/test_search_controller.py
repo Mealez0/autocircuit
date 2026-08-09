@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from autocircuit.search_controller import SearchPolicy, build_search_plan, next_proposal
 
 
@@ -78,7 +77,9 @@ def test_plan_prioritizes_strong_stable_pair_and_reduces_pair_search() -> None:
     policy = SearchPolicy(max_pair_proposals=6, exploration_pair_proposals=2)
     plan = build_search_plan(_head_summary(), _component_summary(), policy=policy)
 
-    pair_proposals = [proposal for proposal in plan["proposals"] if proposal["kind"] == "pair_patch"]
+    pair_proposals = [
+        proposal for proposal in plan["proposals"] if proposal["kind"] == "pair_patch"
+    ]
     assert pair_proposals[0]["heads"] == [3, 6]
     assert pair_proposals[0]["mode"] == "exploit"
     assert len(pair_proposals) == 6
