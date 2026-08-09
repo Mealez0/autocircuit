@@ -9,7 +9,33 @@ permissions:
   contents: read
 
 jobs:
-  quality:
+  lint-and-types:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install static-analysis tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "ruff>=0.9,<1" "mypy>=1.14,<2" "packaging>=24"
+
+      - name: Ruff
+        run: ruff check src tests
+
+      - name: Mypy
+        env:
+          MYPYPATH: src
+        run: python -m mypy --python-version 3.11 src/autocircuit
+
+  tests:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -26,16 +52,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install project
+      - name: Install CPU PyTorch
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
+
+      - name: Install project test dependencies
+        run: python -m pip install -e . "pytest>=8,<9"
 
       - name: Unit tests
         run: pytest -q
-
-      - name: Ruff
-        run: ruff check src tests
-
-      - name: Mypy
-        run: python -m mypy --python-version "${{ matrix.python-version }}" src/autocircuit
