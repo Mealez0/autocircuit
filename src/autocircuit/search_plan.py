@@ -45,7 +45,10 @@ def _pair_feedback(
     n_heads: int,
 ) -> list[Mapping[str, Any]]:
     _discovery_only(head_set_summary, "head-set summary")
-    if _integer(head_set_summary.get("selected_layer"), "head-set selected layer") != selected_layer:
+    head_set_layer = _integer(
+        head_set_summary.get("selected_layer"), "head-set selected layer"
+    )
+    if head_set_layer != selected_layer:
         raise ValueError("head-set selected layer does not match head localization")
     if _integer(head_set_summary.get("n_heads"), "head-set head count") != n_heads:
         raise ValueError("head-set head count does not match head localization")
