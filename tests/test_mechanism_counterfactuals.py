@@ -4,12 +4,12 @@ import hashlib
 
 import pytest
 
-from autocircuit.datasets.associative_recall import ExamplePair
 from autocircuit.mechanism_counterfactuals import (
     build_counterfactual_manifest,
     build_discovery_counterfactuals,
     counterfactual_kind_for_experiment,
 )
+from autocircuit.datasets.associative_recall import ExamplePair
 
 
 class WordTokenizer:
@@ -18,7 +18,10 @@ class WordTokenizer:
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         del add_special_tokens
         tokens = text.replace("\n", " ").split()
-        return [int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "little") for token in tokens]
+        return [
+            int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "little")
+            for token in tokens
+        ]
 
 
 class QueryLengthMismatchTokenizer(WordTokenizer):
@@ -136,7 +139,10 @@ def test_malformed_source_prompt_or_metadata_fails_closed() -> None:
 def test_experiments_have_explicit_counterfactual_requirements() -> None:
     assert counterfactual_kind_for_experiment("interchange_query_state_at_heads") == "query_swap"
     assert counterfactual_kind_for_experiment("interchange_query_state_at_mlp") == "query_swap"
-    assert counterfactual_kind_for_experiment("interchange_value_state_at_mlp") == "value_binding_swap"
+    assert (
+        counterfactual_kind_for_experiment("interchange_value_state_at_mlp")
+        == "value_binding_swap"
+    )
     assert counterfactual_kind_for_experiment("suppress_secondary_head") is None
     with pytest.raises(ValueError, match="unknown mechanism experiment"):
         counterfactual_kind_for_experiment("unregistered")
