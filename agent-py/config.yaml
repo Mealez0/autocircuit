@@ -29,7 +29,7 @@ node_selection:
 
 grouping:
   strategy: "functional"
-  # semantic/layer/hybrid currently fall back to functional grouping.
+  # semantic/layer/hybrid are intentionally rejected until tested implementations exist.
 
 labeling:
   enabled_by_default: false
