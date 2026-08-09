@@ -151,11 +151,11 @@ class CausalSubspace:
         ):
             digest.update(value.encode("utf-8"))
             digest.update(b"\0")
-        for value in self.singular_values:
-            digest.update(struct.pack("<d", float(value)))
+        for singular_value in self.singular_values:
+            digest.update(struct.pack("<d", float(singular_value)))
         digest.update(struct.pack("<d", float(self.between_class_energy_fraction)))
-        for value in self.basis.reshape(-1).tolist():
-            digest.update(struct.pack("<d", float(value)))
+        for coordinate in self.basis.reshape(-1).tolist():
+            digest.update(struct.pack("<d", float(coordinate)))
         return digest.hexdigest()
 
 
