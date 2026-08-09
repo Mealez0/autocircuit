@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import AbstractSet, Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
@@ -197,7 +197,7 @@ def _pair_observations(
             raise ValueError(f"pair result {row_index} has a malformed pair")
         left = _integer(pair_value[0], f"pair result {row_index} left head")
         right = _integer(pair_value[1], f"pair result {row_index} right head")
-        pair = tuple(sorted((left, right)))
+        pair = (min(left, right), max(left, right))
         if (
             left == right
             or pair[0] < 0
@@ -464,7 +464,7 @@ def build_search_plan(
 
 
 def next_proposal(
-    plan: Mapping[str, Any], *, completed_proposal_ids: AbstractSet[str]
+    plan: Mapping[str, Any], *, completed_proposal_ids: Set[str]
 ) -> dict[str, Any] | None:
     """Return the highest-priority unfinished proposal without mutating the plan."""
 
