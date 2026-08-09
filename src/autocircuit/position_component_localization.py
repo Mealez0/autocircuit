@@ -15,14 +15,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from autocircuit.artifacts import sha256, verify_resume
 from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
 from autocircuit.pipeline import (
     PythiaAdapter,
     _git_commit,
     _verify_frozen_discovery,
     _verify_validation_adapter,
-    sha256,
-    verify_resume,
 )
 from autocircuit.position_localization import (
     DIRECTIONS,
