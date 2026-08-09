@@ -1,0 +1,106 @@
+name: Apply artifact helper refactor
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-artifact-refactor.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Apply exact mechanical extraction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/autocircuit/pipeline.py")
+          text = path.read_text(encoding="utf-8")
+
+          import_anchor = "from autocircuit import __version__\n"
+          import_replacement = """from autocircuit import __version__
+          from autocircuit.artifacts import (
+              sha256,
+              verify_resume,
+              write_json as _json,
+              write_json_durable as _validation_json,
+          )
+          """
+
+          top_helpers = '''def sha256(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+          def verify_resume(path: Path, expected_hash: str) -> None:
+              if not path.is_file() or sha256(path) != expected_hash:
+                  raise RuntimeError(f"resume hash verification failed: {path}")
+
+
+          def _json(path: Path, value: Any) -> None:
+              path.write_bytes(
+                  (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\\n").encode("utf-8")
+              )
+
+
+          '''
+
+          durable_helper = '''def _validation_json(path: Path, value: Any) -> None:
+              """Durably replace a validation JSON file without truncating the previous state."""
+              descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+              temporary = Path(temporary_name)
+              try:
+                  with os.fdopen(descriptor, "w", encoding="utf-8", newline="\\n") as handle:
+                      json.dump(value, handle, allow_nan=False, indent=2, sort_keys=True)
+                      handle.write("\\n")
+                      handle.flush()
+                      os.fsync(handle.fileno())
+                  os.replace(temporary, path)
+                  try:
+                      directory = os.open(path.parent, os.O_RDONLY)
+                      try:
+                          os.fsync(directory)
+                      finally:
+                          os.close(directory)
+                  except OSError:
+                      # Directory handles/fsync are unavailable on some Windows filesystems.
+                      pass
+              finally:
+                  temporary.unlink(missing_ok=True)
+
+
+          '''
+
+          assert text.count(import_anchor) == 1, "unexpected __version__ import anchor count"
+          assert text.count(top_helpers) == 1, "artifact helper block drifted; refusing to patch"
+          assert text.count(durable_helper) == 1, "durable helper block drifted; refusing to patch"
+
+          text = text.replace(import_anchor, import_replacement, 1)
+          text = text.replace(top_helpers, "", 1)
+          text = text.replace(durable_helper, "", 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+
+      - name: Verify changed surface
+        run: |
+          python -m compileall -q src/autocircuit
+          git diff --check
+          git diff -- src/autocircuit/pipeline.py
+
+      - name: Commit mechanical refactor
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/pipeline.py
+          git commit -m "Extract pipeline artifact helpers"
+          git push origin HEAD:agent/ci-agent-hardening
