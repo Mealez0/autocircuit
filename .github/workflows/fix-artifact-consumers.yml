@@ -1,0 +1,124 @@
+name: Fix artifact helper consumers
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/fix-artifact-consumers.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+
+      - name: Move helper imports to artifact module
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "src/autocircuit/position_localization.py": (
+                  '''from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+              sha256,
+              verify_resume,
+          )
+          ''',
+                  '''from autocircuit.artifacts import sha256, verify_resume
+          from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+          )
+          ''',
+              ),
+              "src/autocircuit/position_component_localization.py": (
+                  '''from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+              sha256,
+              verify_resume,
+          )
+          ''',
+                  '''from autocircuit.artifacts import sha256, verify_resume
+          from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+          )
+          ''',
+              ),
+              "src/autocircuit/position_head_localization.py": (
+                  '''from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+              sha256,
+              verify_resume,
+          )
+          ''',
+                  '''from autocircuit.artifacts import sha256, verify_resume
+          from autocircuit.datasets.associative_recall import ExamplePair, read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+          )
+          ''',
+              ),
+              "src/autocircuit/position_head_set_analysis.py": (
+                  '''from autocircuit.datasets.associative_recall import read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+              sha256,
+          )
+          ''',
+                  '''from autocircuit.artifacts import sha256
+          from autocircuit.datasets.associative_recall import read_jsonl
+          from autocircuit.pipeline import (
+              PythiaAdapter,
+              _git_commit,
+              _verify_frozen_discovery,
+              _verify_validation_adapter,
+          )
+          ''',
+              ),
+          }
+
+          for filename, (old, new) in replacements.items():
+              path = Path(filename)
+              text = path.read_text(encoding="utf-8")
+              assert text.count(old) == 1, f"import block drifted in {filename}; refusing to patch"
+              path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+
+      - name: Commit consumer import refactor
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/position_*localization.py src/autocircuit/position_head_set_analysis.py
+          git commit -m "Decouple localization artifact helpers from pipeline"
+          git push origin HEAD:agent/ci-agent-hardening
