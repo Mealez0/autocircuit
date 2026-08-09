@@ -1,0 +1,159 @@
+name: Apply adaptive necessity budget
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-necessity-budget.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+
+      - name: Apply exact controller and CLI changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          controller = Path("src/autocircuit/search_controller.py")
+          text = controller.read_text(encoding="utf-8")
+          replacements = [
+              (
+                  '''    max_pair_proposals: int = 8
+              exploration_pair_proposals: int = 2
+              max_path_proposals: int = 2
+              uncertainty_weight: float = 0.5
+              ''',
+                  '''    max_pair_proposals: int = 8
+              exploration_pair_proposals: int = 2
+              max_path_proposals: int = 2
+              max_necessity_proposals: int = 2
+              uncertainty_weight: float = 0.5
+              ''',
+              ),
+              (
+                  '''            "max_path_proposals": self.max_path_proposals,
+              }
+              ''',
+                  '''            "max_path_proposals": self.max_path_proposals,
+                  "max_necessity_proposals": self.max_necessity_proposals,
+              }
+              ''',
+              ),
+              (
+                  '''def _necessity_followups(observations: Sequence[PairObservation]) -> list[dict[str, Any]]:
+              return [
+                  {
+                      "proposal_id": f"leave_pair_out_{item.pair[0]}_{item.pair[1]}",
+                      "kind": "pair_necessity",
+                      "mode": "adaptive_follow_up",
+                      "heads": list(item.pair),
+                      "trigger": "observed_pair_ci_lower_bound_positive",
+                      "evidence_status": "proposal_only_not_evidence",
+                      "observed_pair_evidence": {
+                          "family_specific_advantage": item.advantage,
+                          "family_specific_advantage_ci_95": [item.ci_low, item.ci_high],
+                      },
+                  }
+                  for item in observations
+                  if item.stable_positive
+              ]
+              ''',
+                  '''def _necessity_followups(
+                  observations: Sequence[PairObservation], count: int
+              ) -> list[dict[str, Any]]:
+                  stable = [item for item in observations if item.stable_positive]
+                  return [
+                      {
+                          "proposal_id": f"leave_pair_out_{item.pair[0]}_{item.pair[1]}",
+                          "kind": "pair_necessity",
+                          "mode": "adaptive_follow_up",
+                          "heads": list(item.pair),
+                          "trigger": "observed_pair_ci_lower_bound_positive",
+                          "evidence_status": "proposal_only_not_evidence",
+                          "observed_pair_evidence": {
+                              "family_specific_advantage": item.advantage,
+                              "family_specific_advantage_ci_95": [item.ci_low, item.ci_high],
+                          },
+                      }
+                      for item in stable[:count]
+                  ]
+              ''',
+              ),
+              (
+                  '''    followups = _necessity_followups(observations)
+              ''',
+                  '''    stable_observed_count = sum(item.stable_positive for item in observations)
+                  followups = _necessity_followups(
+                      observations, selected_policy.max_necessity_proposals
+                  )
+              ''',
+              ),
+              (
+                  '''            "max_path_proposals": selected_policy.max_path_proposals,
+                  "uncertainty_weight": selected_policy.uncertainty_weight,
+              ''',
+                  '''            "max_path_proposals": selected_policy.max_path_proposals,
+                  "max_necessity_proposals": selected_policy.max_necessity_proposals,
+                  "uncertainty_weight": selected_policy.uncertainty_weight,
+              ''',
+              ),
+              (
+                  '''            "observed_head_pairs": len(observed_pairs),
+                  "proposed_head_pairs": proposed_pair_count,
+              ''',
+                  '''            "observed_head_pairs": len(observed_pairs),
+                  "stable_observed_pairs": stable_observed_count,
+                  "proposed_necessity_followups": len(followups),
+                  "necessity_followups_deferred": stable_observed_count - len(followups),
+                  "proposed_head_pairs": proposed_pair_count,
+              ''',
+              ),
+          ]
+          for old, new in replacements:
+              assert text.count(old) == 1, f"controller patch drifted: {old[:80]!r}"
+              text = text.replace(old, new, 1)
+          controller.write_text(text, encoding="utf-8", newline="\n")
+
+          cli = Path("src/autocircuit/search_plan.py")
+          text = cli.read_text(encoding="utf-8")
+          replacements = [
+              (
+                  '''    parser.add_argument("--max-path-proposals", type=int, default=2)
+                  parser.add_argument("--uncertainty-weight", type=float, default=0.5)
+              ''',
+                  '''    parser.add_argument("--max-path-proposals", type=int, default=2)
+                  parser.add_argument("--max-necessity-proposals", type=int, default=2)
+                  parser.add_argument("--uncertainty-weight", type=float, default=0.5)
+              ''',
+              ),
+              (
+                  '''            max_path_proposals=args.max_path_proposals,
+                  uncertainty_weight=args.uncertainty_weight,
+              ''',
+                  '''            max_path_proposals=args.max_path_proposals,
+                  max_necessity_proposals=args.max_necessity_proposals,
+                  uncertainty_weight=args.uncertainty_weight,
+              ''',
+              ),
+          ]
+          for old, new in replacements:
+              assert text.count(old) == 1, f"CLI patch drifted: {old[:80]!r}"
+              text = text.replace(old, new, 1)
+          cli.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+
+      - name: Commit adaptive necessity budget
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/search_controller.py src/autocircuit/search_plan.py
+          git commit -m "Bound adaptive necessity follow-ups"
+          git push origin HEAD:agent/ci-agent-hardening
