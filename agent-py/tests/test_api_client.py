@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,7 @@ class FakeResponse:
         self,
         *,
         status_code: int = 200,
-        body: bytes = b'{}',
+        body: bytes = b"{}",
         json_data: Any = None,
         content_type: str = "application/json",
     ) -> None:
@@ -53,8 +55,9 @@ class FakeSession:
         return self.responses.pop(0)
 
 
-def test_generate_graph_executes_request_and_writes_atomically(tmp_path: Path) -> None:
-    response = FakeResponse(body=b'{"nodes": [], "edges": []}')
+def test_generate_graph_executes_request_and_writes_provenance(tmp_path: Path) -> None:
+    body = b'{"nodes": [], "edges": []}'
+    response = FakeResponse(body=body)
     session = FakeSession([response])
     client = NeuronpediaGraphClient(
         base_url="http://graph.test/",
@@ -70,11 +73,55 @@ def test_generate_graph_executes_request_and_writes_atomically(tmp_path: Path) -
     )
 
     assert result.path == output
-    assert output.read_bytes() == b'{"nodes": [], "edges": []}'
+    assert output.read_bytes() == body
+    assert result.sha256 == hashlib.sha256(body).hexdigest()
+    assert result.byte_count == len(body)
+    assert result.manifest_path.exists()
+
+    manifest_text = result.manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    assert manifest["response"]["sha256"] == result.sha256
+    assert manifest["response"]["byte_count"] == len(body)
+    assert manifest["request"]["payload"]["prompt"] == "The capital of France is"
+    assert "secret-value" not in manifest_text
+
     assert response.closed
     assert session.calls[0]["url"] == "http://graph.test/generate-graph"
     assert session.calls[0]["headers"]["x-secret-key"] == "secret-value"
     assert session.calls[0]["json"]["prompt"] == "The capital of France is"
+
+
+def test_generate_graph_accepts_leading_json_whitespace(tmp_path: Path) -> None:
+    response = FakeResponse(body=b'\n  {"nodes": [], "edges": []}')
+    client = NeuronpediaGraphClient(
+        base_url="http://graph.test",
+        session=FakeSession([response]),  # type: ignore[arg-type]
+    )
+
+    result = client.generate_graph(
+        prompt="x",
+        model_id="google/gemma-2-2b",
+        output_path=tmp_path / "graph.json",
+    )
+
+    assert result.path.exists()
+    assert result.manifest_path.exists()
+
+
+def test_generate_graph_rejects_successful_non_json_response(tmp_path: Path) -> None:
+    response = FakeResponse(body=b"<html>proxy error</html>", content_type="text/html")
+    client = NeuronpediaGraphClient(
+        base_url="http://graph.test",
+        session=FakeSession([response]),  # type: ignore[arg-type]
+    )
+    output = tmp_path / "graph.json"
+
+    with pytest.raises(NeuronpediaAPIError, match="was not JSON"):
+        client.generate_graph(prompt="x", model_id="google/gemma-2-2b", output_path=output)
+
+    assert not output.exists()
+    assert not (tmp_path / "graph.json.manifest.json").exists()
+    assert response.closed
 
 
 def test_http_error_is_not_converted_to_fake_success() -> None:
@@ -90,6 +137,7 @@ def test_http_error_is_not_converted_to_fake_success() -> None:
 
     assert caught.value.status_code == 401
     assert "unauthorized" in caught.value.body
+    assert response.closed
 
 
 def test_steer_returns_structured_json() -> None:
