@@ -20,7 +20,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from autocircuit import __version__
+from autocircuit.artifacts import checkpoint as _checkpoint
 from autocircuit.artifacts import sha256, verify_resume
+from autocircuit.artifacts import validate_checkpoints as _validate_checkpoints
 from autocircuit.artifacts import write_json as _json
 from autocircuit.artifacts import write_json_durable as _validation_json
 from autocircuit.baseline import (
@@ -1229,16 +1231,6 @@ def _fingerprint(args: argparse.Namespace, config_hash: str) -> str:
         "config_hash": config_hash,
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
-def _checkpoint(root: Path, state: dict[str, Any], path: Path) -> None:
-    state["artifact_hashes"][str(path.relative_to(root)).replace("\\", "/")] = sha256(path)
-    _json(root / "run_manifest.json", state)
-
-
-def _validate_checkpoints(root: Path, state: dict[str, Any]) -> None:
-    for relative, digest in state.get("artifact_hashes", {}).items():
-        verify_resume(root / relative, str(digest))
 
 
 def _validate_external_artifacts(state: dict[str, Any]) -> None:
