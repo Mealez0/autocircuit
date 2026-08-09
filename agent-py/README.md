@@ -2,7 +2,7 @@
 
 This directory is a legacy-compatible CLI for generating Neuronpedia attribution graphs, cleaning them locally, and optionally labeling grouped nodes.
 
-The API bridge is now an actual transport layer: `generate-only` and `cleanup` execute HTTP requests against a Neuronpedia graph server. They no longer print placeholder messages such as "would call the API" and then stop.
+The API bridge is an actual transport layer: `generate-only` and `cleanup` execute HTTP requests against a Neuronpedia graph server. They do not print placeholder messages such as "would call the API" and then stop.
 
 ## Install
 
@@ -22,10 +22,10 @@ Development tests:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-PYTHONPATH=. pytest -q tests/test_api_client.py
+PYTHONPATH=. pytest -q tests
 ```
 
-The old semantic-grouping dependencies were removed from the core install because semantic, layer, and hybrid grouping are not implemented yet; those modes currently fall back to functional grouping.
+The old semantic-grouping dependency stack was removed from the core install because semantic, layer, and hybrid grouping are not implemented. Those modes are now rejected explicitly instead of silently producing functional-grouping output.
 
 ## Graph server connection
 
@@ -114,11 +114,11 @@ Node selection:
 Grouping:
 
 - `functional` — implemented
-- `semantic` — currently falls back to functional
-- `layer` — currently falls back to functional
-- `hybrid` — currently falls back to functional
+- `semantic` — not implemented; explicit error
+- `layer` — not implemented; explicit error
+- `hybrid` — not implemented; explicit error
 
-The fallback is documented rather than hidden so research output is not mistaken for a semantic clustering result.
+This fail-visible behavior prevents research output from being mislabeled as the result of an algorithm that never ran.
 
 ## Safety / failure semantics
 
@@ -130,5 +130,6 @@ The agent bridge follows fail-visible behavior:
 - Raw graph files are atomically replaced only after a complete response is received.
 - LLM labeling failures are surfaced instead of silently returning fabricated fallback labels.
 - Authentication secrets are never included in provenance artifacts.
+- Agent instructions explicitly prohibit simulated tool/API calls in prose.
 
 This keeps safety checks without turning execution into a text-only simulation.
