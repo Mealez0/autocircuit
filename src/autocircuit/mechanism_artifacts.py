@@ -113,8 +113,12 @@ def _alignment_from_dict(value: Mapping[str, Any]) -> ActivationAlignment:
     selected_heads = value.get("selected_heads")
     subspace_value = value.get("subspace")
     evidence_status = value.get("evidence_status")
-    if not all(isinstance(item, str) for item in (alignment_id, variable_name, hook_site)):
-        raise ValueError("activation alignment identity fields are malformed")
+    if not isinstance(alignment_id, str):
+        raise ValueError("activation alignment id is malformed")
+    if not isinstance(variable_name, str):
+        raise ValueError("activation alignment variable name is malformed")
+    if not isinstance(hook_site, str):
+        raise ValueError("activation alignment hook site is malformed")
     if not isinstance(position_index, int) or isinstance(position_index, bool):
         raise ValueError("activation alignment position is malformed")
     if not isinstance(selected_heads, list) or not all(

@@ -43,6 +43,12 @@ def _string(value: Any, label: str) -> str:
     return value
 
 
+def _integer(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer")
+    return value
+
+
 def _variables(raw: Any) -> tuple[MechanismVariable, ...]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("serialized mechanism variables are malformed")
@@ -209,10 +215,16 @@ def _counterfactuals(raw_manifest: Mapping[str, Any]) -> tuple[CounterfactualPai
             donor_query_entity=_string(raw.get("donor_query_entity"), "donor query entity"),
             base_target_text=_string(raw.get("base_target_text"), "base target text"),
             donor_target_text=_string(raw.get("donor_target_text"), "donor target text"),
-            base_target_token_id=raw.get("base_target_token_id"),
-            donor_target_token_id=raw.get("donor_target_token_id"),
+            base_target_token_id=_integer(
+                raw.get("base_target_token_id"), "base target token id"
+            ),
+            donor_target_token_id=_integer(
+                raw.get("donor_target_token_id"), "donor target token id"
+            ),
             changed_variables=tuple(changed),
-            prompt_token_length=raw.get("prompt_token_length"),
+            prompt_token_length=_integer(
+                raw.get("prompt_token_length"), "counterfactual prompt token length"
+            ),
             evidence_status=_string(raw.get("evidence_status"), "counterfactual evidence status"),
         )
         pairs.append(pair)
