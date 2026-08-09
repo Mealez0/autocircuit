@@ -22,9 +22,7 @@ def cli() -> None:
     """Neuronpedia Attribution Graph Cleanup Automation Agent."""
 
 
-def _node_lookup(nodes: object) -> dict[str, dict[str, Any]]:
-    if not isinstance(nodes, list):
-        return {}
+def _node_lookup(nodes: list[object]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for node in nodes:
         if not isinstance(node, dict) or "id" not in node:
@@ -49,9 +47,12 @@ def _clean_graph_file(
     if not isinstance(graph_data, dict):
         raise click.ClickException("Graph JSON must be an object")
 
+    nodes = graph_data.get("nodes")
+    edges = graph_data.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise click.ClickException("Graph JSON must contain list-valued 'nodes' and 'edges'")
+
     analyzer = GraphAnalyzer(graph_data)
-    nodes = graph_data.get("nodes", [])
-    edges = graph_data.get("edges", [])
     click.echo(f"Graph loaded: {len(nodes)} nodes, {len(edges)} edges")
 
     selector = NodeSelector(analyzer, max_nodes=max_nodes)
@@ -125,6 +126,22 @@ def _make_client(
     )
 
 
+def _print_generation_result(generated: object) -> None:
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "path": str(generated.path),
+                "manifest": str(generated.manifest_path),
+                "bytes": generated.byte_count,
+                "sha256": generated.sha256,
+                "content_type": generated.content_type,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @cli.command()
 @click.option("--prompt", required=True, help="Input prompt for graph generation")
 @click.option("--model", default=DEFAULT_MODEL, show_default=True, help="Graph-server model id")
@@ -175,7 +192,7 @@ def cleanup(
             model_id=model,
             output_path=raw_graph_output,
         )
-        click.echo(f"✓ API graph saved: {generated.path} ({generated.byte_count:,} bytes)")
+        _print_generation_result(generated)
         _clean_graph_file(
             generated.path,
             output,
@@ -255,17 +272,7 @@ def generate_only(
         detail = f" ({exc.body})" if exc.body else ""
         raise click.ClickException(f"Neuronpedia API error: {exc}{detail}") from exc
 
-    click.echo(
-        json.dumps(
-            {
-                "status": "ok",
-                "path": str(generated.path),
-                "bytes": generated.byte_count,
-                "content_type": generated.content_type,
-            },
-            sort_keys=True,
-        )
-    )
+    _print_generation_result(generated)
 
 
 @cli.command()
@@ -278,14 +285,17 @@ def analyze(graph_file: str) -> None:
         if not isinstance(graph_data, dict):
             raise click.ClickException("Graph JSON must be an object")
 
-        analyzer = GraphAnalyzer(graph_data)
-        num_nodes = len(graph_data.get("nodes", []))
-        num_edges = len(graph_data.get("edges", []))
-        click.echo("\nGraph Statistics:")
-        click.echo(f"  Nodes: {num_nodes}")
-        click.echo(f"  Edges: {num_edges}")
+        nodes = graph_data.get("nodes")
+        edges = graph_data.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            raise click.ClickException("Graph JSON must contain list-valued 'nodes' and 'edges'")
 
-        layers = [node.get("layer", 0) for node in graph_data.get("nodes", [])]
+        analyzer = GraphAnalyzer(graph_data)
+        click.echo("\nGraph Statistics:")
+        click.echo(f"  Nodes: {len(nodes)}")
+        click.echo(f"  Edges: {len(edges)}")
+
+        layers = [node.get("layer", 0) for node in nodes if isinstance(node, dict)]
         if layers:
             click.echo(f"  Layers: {min(layers)}-{max(layers)}")
 
