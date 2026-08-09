@@ -53,3 +53,31 @@ def test_validation_json_atomically_replaces_and_leaves_no_temp_files(tmp_path: 
     assert json.loads(second) == {"complete": True, "generation": 2}
     assert second.endswith(b"\n")
     assert not list(tmp_path.glob(".manifest.json.*"))
+
+
+def test_checkpoint_records_posix_relative_hash_and_updates_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    artifact = root / "nested" / "result.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b'{"ok": true}\n')
+    state: dict[str, object] = {"artifact_hashes": {}, "complete": False}
+
+    pipeline._checkpoint(root, state, artifact)
+
+    expected_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert state["artifact_hashes"] == {"nested/result.json": expected_hash}
+    assert json.loads((root / "run_manifest.json").read_text(encoding="utf-8")) == state
+
+
+def test_validate_checkpoints_rejects_tampering(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    artifact = root / "result.bin"
+    artifact.write_bytes(b"stable\n")
+    state = {"artifact_hashes": {"result.bin": pipeline.sha256(artifact)}}
+
+    pipeline._validate_checkpoints(root, state)
+    artifact.write_bytes(b"tampered\n")
+
+    with pytest.raises(RuntimeError, match=r"resume hash verification failed: .*result\.bin"):
+        pipeline._validate_checkpoints(root, state)
