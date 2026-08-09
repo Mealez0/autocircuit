@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from autocircuit.datasets.associative_recall import ExamplePair, TEMPLATES
+from autocircuit.datasets.associative_recall import TEMPLATES, ExamplePair
 from autocircuit.datasets.validation import (
     DatasetValidationError,
     Tokenizer,
@@ -194,7 +194,14 @@ def _counterfactual_id(
     donor_target: str,
 ) -> str:
     payload = json.dumps(
-        [COUNTERFACTUAL_VERSION, example.example_id, example.family_id, kind, donor_query, donor_target],
+        [
+            COUNTERFACTUAL_VERSION,
+            example.example_id,
+            example.family_id,
+            kind,
+            donor_query,
+            donor_target,
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")

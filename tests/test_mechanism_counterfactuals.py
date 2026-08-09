@@ -4,12 +4,12 @@ import hashlib
 
 import pytest
 
+from autocircuit.datasets.associative_recall import ExamplePair
 from autocircuit.mechanism_counterfactuals import (
     build_counterfactual_manifest,
     build_discovery_counterfactuals,
     counterfactual_kind_for_experiment,
 )
-from autocircuit.datasets.associative_recall import ExamplePair
 
 
 class WordTokenizer:
