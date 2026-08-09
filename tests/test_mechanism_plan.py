@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from autocircuit.mechanism_plan import generate_mechanism_plan
 from autocircuit.mechanism_synthesis import build_associative_recall_campaign
 

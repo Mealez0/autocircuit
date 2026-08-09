@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from autocircuit.mechanism_synthesis import evaluate_campaign, select_next_experiment
 from autocircuit.mechanisms import (
     MechanismCampaign,

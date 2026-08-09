@@ -10,11 +10,18 @@ from dataclasses import dataclass
 from typing import Any
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_SLUG = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _identifier(value: str, label: str) -> str:
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise ValueError(f"{label} must be a lowercase identifier")
+    return value
+
+
+def _slug(value: str, label: str) -> str:
+    if not isinstance(value, str) or not _SLUG.fullmatch(value):
+        raise ValueError(f"{label} must be a lowercase slug")
     return value
 
 
@@ -152,7 +159,9 @@ class MechanismHypothesis:
 
         producers: dict[str, str] = {}
         for step in self.steps:
-            if step.output not in variable_set or any(item not in variable_set for item in step.inputs):
+            if step.output not in variable_set or any(
+                item not in variable_set for item in step.inputs
+            ):
                 raise ValueError("mechanism step references an unknown variable")
             if step.output in producers:
                 raise ValueError("mechanism variable has multiple producing steps")
@@ -230,7 +239,7 @@ class MechanismCampaign:
     candidate_carriers: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        _identifier(self.campaign_id, "campaign id")
+        _slug(self.campaign_id, "campaign id")
         _identifier(self.task, "campaign task")
         if not self.hypotheses or not self.experiments:
             raise ValueError("mechanism campaign requires hypotheses and experiments")
@@ -246,7 +255,9 @@ class MechanismCampaign:
             if predicted != required:
                 raise ValueError("mechanism campaign prediction matrix is incomplete")
         if self.selected_layer is not None and (
-            isinstance(self.selected_layer, bool) or self.selected_layer < 0
+            not isinstance(self.selected_layer, int)
+            or isinstance(self.selected_layer, bool)
+            or self.selected_layer < 0
         ):
             raise ValueError("selected layer must be a non-negative integer")
 

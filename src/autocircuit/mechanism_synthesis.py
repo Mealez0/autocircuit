@@ -307,7 +307,11 @@ def evaluate_campaign(
 
 
 def _entropy(probabilities: list[float]) -> float:
-    return -sum(probability * math.log2(probability) for probability in probabilities if probability)
+    return -sum(
+        probability * math.log2(probability)
+        for probability in probabilities
+        if probability
+    )
 
 
 def select_next_experiment(
@@ -324,7 +328,9 @@ def select_next_experiment(
     if len(survivors) <= 1:
         return None
 
-    candidate_scores: list[tuple[float, float, float, str, MechanismExperiment, dict[str, list[str]]]] = []
+    candidate_scores: list[
+        tuple[float, float, float, str, MechanismExperiment, dict[str, list[str]]]
+    ] = []
     for experiment in campaign.experiments:
         if experiment.experiment_id in checked:
             continue
