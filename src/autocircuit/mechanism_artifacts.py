@@ -50,7 +50,9 @@ def _subspace_from_dict(value: Mapping[str, Any]) -> CausalSubspace:
     singular_values = value.get("singular_values")
     if not isinstance(basis, list) or not basis or not all(isinstance(row, list) for row in basis):
         raise ValueError("causal subspace artifact basis is malformed")
-    if not isinstance(class_labels, list) or not all(isinstance(label, str) for label in class_labels):
+    if not isinstance(class_labels, list) or not all(
+        isinstance(label, str) for label in class_labels
+    ):
         raise ValueError("causal subspace artifact class labels are malformed")
     if not isinstance(singular_values, list) or not all(
         isinstance(item, int | float) and not isinstance(item, bool) for item in singular_values
@@ -211,7 +213,10 @@ def load_alignment_manifest(value: Mapping[str, Any]) -> dict[str, ActivationAli
     """Validate and reconstruct an alignment manifest, rejecting tampering fail-closed."""
 
     _guard_discovery_artifact(value, "alignment manifest")
-    if value.get("schema_version") != 1 or value.get("artifact_version") != ALIGNMENT_ARTIFACT_VERSION:
+    if (
+        value.get("schema_version") != 1
+        or value.get("artifact_version") != ALIGNMENT_ARTIFACT_VERSION
+    ):
         raise ValueError("unsupported alignment manifest schema or version")
     sources = value.get("source_artifacts")
     identity = value.get("model_identity")

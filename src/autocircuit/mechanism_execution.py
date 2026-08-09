@@ -120,7 +120,10 @@ def _hypotheses(raw: Any) -> tuple[MechanismHypothesis, ...]:
             predictions=_predictions(item.get("predictions")),
         )
         topological = item.get("topological_steps")
-        if not isinstance(topological, list) or tuple(topological) != hypothesis.topological_steps():
+        if (
+            not isinstance(topological, list)
+            or tuple(topological) != hypothesis.topological_steps()
+        ):
             raise ValueError("serialized mechanism topological order is inconsistent")
         values.append(hypothesis)
     return tuple(values)
