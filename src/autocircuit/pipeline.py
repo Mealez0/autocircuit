@@ -20,6 +20,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from autocircuit import __version__
+from autocircuit.artifacts import (
+    sha256,
+    verify_resume,
+    write_json as _json,
+    write_json_durable as _validation_json,
+)
 from autocircuit.baseline import (
     BaselineMetrics,
     ExampleResult,
@@ -142,21 +148,6 @@ class PythiaAdapter:
         if any(record is None for record in records):
             raise RuntimeError("internal scoring error: missing result record")
         return [record for record in records if record is not None]
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def verify_resume(path: Path, expected_hash: str) -> None:
-    if not path.is_file() or sha256(path) != expected_hash:
-        raise RuntimeError(f"resume hash verification failed: {path}")
-
-
-def _json(path: Path, value: Any) -> None:
-    path.write_bytes(
-        (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    )
 
 
 def _position_fingerprint_components(args: argparse.Namespace) -> dict[str, Any]:
@@ -436,30 +427,6 @@ def _validate_validation_hash_paths(root: Path, state: dict[str, Any]) -> None:
         candidate = (root / Path(*path.parts)).resolve()
         if not candidate.is_relative_to(root.resolve()):
             raise RuntimeError("validation artifact hash path escapes the output root")
-
-
-def _validation_json(path: Path, value: Any) -> None:
-    """Durably replace a validation JSON file without truncating the previous state."""
-    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, allow_nan=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        try:
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError:
-            # Directory handles/fsync are unavailable on some Windows filesystems.
-            pass
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _validation_receipt_payload(
