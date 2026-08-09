@@ -241,7 +241,9 @@ def _interchange_callback(
     return callback
 
 
-def _suppression_callback(recipe: InterventionRecipe) -> Callable[[torch.Tensor, Any], torch.Tensor]:
+def _suppression_callback(
+    recipe: InterventionRecipe,
+) -> Callable[[torch.Tensor, Any], torch.Tensor]:
     def callback(value: torch.Tensor, hook: Any = None) -> torch.Tensor:
         del hook
         if not isinstance(value, torch.Tensor) or value.ndim != 4:
