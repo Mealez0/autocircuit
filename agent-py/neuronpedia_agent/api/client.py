@@ -1,17 +1,19 @@
 """Typed transport for the Neuronpedia graph server.
 
-This module deliberately contains no LLM/agent behavior.  Agent code calls this
+This module deliberately contains no LLM/agent behavior. Agent code calls this
 transport and receives structured Python values or explicit exceptions; it never
 simulates API calls by printing prose.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,7 +38,9 @@ class GeneratedGraph:
     """Metadata for a graph response written to disk."""
 
     path: Path
+    manifest_path: Path
     byte_count: int
+    sha256: str
     content_type: str
 
 
@@ -44,7 +48,7 @@ class NeuronpediaGraphClient:
     """Small, synchronous client for Neuronpedia's graph server API.
 
     The current upstream graph-server contract exposes ``POST /generate-graph``
-    and ``POST /steer`` and authenticates with an ``x-secret-key`` header.  The
+    and ``POST /steer`` and authenticates with an ``x-secret-key`` header. The
     auth header is configurable because hosted/proxied deployments sometimes use
     a different gateway header.
     """
@@ -80,7 +84,7 @@ class NeuronpediaGraphClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "AutoCircuit-Agent/0.1",
+            "User-Agent": "AutoCircuit-Agent/0.2",
         }
         if self.secret:
             headers[self.auth_header] = self.secret
@@ -93,6 +97,22 @@ class NeuronpediaGraphClient:
     def _error_body(response: requests.Response) -> str:
         text = response.text.strip()
         return text[:2000]
+
+    @staticmethod
+    def _atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
+                handle.write("\n")
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+            raise
 
     def _request(
         self,
@@ -125,6 +145,7 @@ class NeuronpediaGraphClient:
 
             body = self._error_body(response)
             if response.status_code not in _RETRYABLE_STATUS_CODES or attempt + 1 >= attempts:
+                response.close()
                 raise NeuronpediaAPIError(
                     f"Neuronpedia request failed with HTTP {response.status_code}",
                     status_code=response.status_code,
@@ -179,21 +200,22 @@ class NeuronpediaGraphClient:
 
         fd, tmp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
         byte_count = 0
+        digest = hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as handle:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         handle.write(chunk)
+                        digest.update(chunk)
                         byte_count += len(chunk)
             if byte_count == 0:
                 raise NeuronpediaAPIError("Neuronpedia returned an empty graph response")
 
-            # Fail early on the common case where a proxy returns a short text/HTML
-            # error with a 2xx status.  Large graph JSON is intentionally not loaded
-            # into memory here.
+            # Fail early on the common case where a proxy returns text/HTML with
+            # a 2xx status. Leading JSON whitespace is permitted.
             with open(tmp_name, "rb") as handle:
-                first = handle.read(1)
-            if first not in {b"{", b"["}:
+                first_non_whitespace = handle.read(4096).lstrip()[:1]
+            if first_non_whitespace not in {b"{", b"["}:
                 raise NeuronpediaAPIError(
                     "Neuronpedia graph response was not JSON",
                     body=f"content-type={content_type!r}",
@@ -209,14 +231,40 @@ class NeuronpediaGraphClient:
         finally:
             response.close()
 
-        return GeneratedGraph(path=destination, byte_count=byte_count, content_type=content_type)
+        sha256 = digest.hexdigest()
+        manifest_path = destination.with_name(f"{destination.name}.manifest.json")
+        self._atomic_json_write(
+            manifest_path,
+            {
+                "schema_version": "autocircuit-neuronpedia-graph-v1",
+                "created_at": datetime.now(UTC).isoformat(),
+                "request": {
+                    "endpoint": self._url("/generate-graph"),
+                    "payload": payload,
+                },
+                "response": {
+                    "path": str(destination),
+                    "byte_count": byte_count,
+                    "sha256": sha256,
+                    "content_type": content_type,
+                },
+            },
+        )
+
+        return GeneratedGraph(
+            path=destination,
+            manifest_path=manifest_path,
+            byte_count=byte_count,
+            sha256=sha256,
+            content_type=content_type,
+        )
 
     def steer(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Execute a graph-server steering intervention and return structured JSON."""
         response = self._request("/steer", payload)
         try:
             data = response.json()
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, requests.exceptions.JSONDecodeError) as exc:
             raise NeuronpediaAPIError(
                 "Neuronpedia steering response was not valid JSON",
                 body=self._error_body(response),
