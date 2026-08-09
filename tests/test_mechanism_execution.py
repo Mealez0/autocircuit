@@ -108,7 +108,7 @@ def _alignment_manifest() -> dict[str, object]:
 def _pair(kind: str, suffix: str = "1") -> CounterfactualPair:
     query = kind == "query_swap"
     return CounterfactualPair(
-        counterfactual_id=f"mcf-{suffix}",
+        counterfactual_id=f"mcf-{kind}-{suffix}",
         source_example_id=f"example-{suffix}",
         source_family_id=f"family-{suffix}",
         split="discovery",
