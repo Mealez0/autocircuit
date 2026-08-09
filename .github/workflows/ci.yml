@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/ci-agent-hardening]
   pull_request:
 
 permissions:
