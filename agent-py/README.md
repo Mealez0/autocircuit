@@ -1,94 +1,134 @@
-# Neuronpedia Attribution Graph Cleanup Automation Agent
+# Neuronpedia Attribution Graph Agent
 
-An automated tool for cleaning and organizing attribution graphs generated from prompts in Neuronpedia's Circuit Tracer.
+This directory is a legacy-compatible CLI for generating Neuronpedia attribution graphs, cleaning them locally, and optionally labeling grouped nodes.
 
-## Overview
+The API bridge is now an actual transport layer: `generate-only` and `cleanup` execute HTTP requests against a Neuronpedia graph server. They no longer print placeholder messages such as "would call the API" and then stop.
 
-This agent automates the manual process of:
-- Pinning important nodes from attribution graphs
-- Grouping nodes into interpretable supernodes
-- Generating human-readable labels for functional modules
-- Computing quality metrics (replacement and completeness scores)
+## Install
 
-## Installation
+Minimal graph generation / cleanup:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-## Quick Start
-
-### Analyze an existing graph
+Optional LLM labels:
 
 ```bash
-python main.py analyze --graph-file my_graph.json
+python -m pip install -r requirements-labeling.txt
 ```
 
-### Cleanup an existing graph
+Development tests:
 
 ```bash
-export ANTHROPIC_API_KEY=your_api_key
+python -m pip install -r requirements-dev.txt
+PYTHONPATH=. pytest -q tests/test_api_client.py
+```
+
+The old semantic-grouping dependencies were removed from the core install because semantic, layer, and hybrid grouping are not implemented yet; those modes currently fall back to functional grouping.
+
+## Graph server connection
+
+The CLI targets the Neuronpedia graph-server contract (`POST /generate-graph` and `POST /steer`). The default is a local server on port 5004.
+
+```bash
+export NEURONPEDIA_GRAPH_URL=http://localhost:5004
+export NEURONPEDIA_GRAPH_SECRET=your_server_secret
+```
+
+The default auth header is `x-secret-key`. For a proxy or deployment that uses another header:
+
+```bash
+export NEURONPEDIA_AUTH_HEADER=x-api-key
+```
+
+Secrets are sent only as request headers. They are not written into graph provenance manifests.
+
+## Generate a graph
+
+```bash
+python main.py generate-only \
+  --prompt "The capital of France is" \
+  --model google/gemma-2-2b \
+  --output graph.json
+```
+
+On success the command prints a small structured JSON result containing the graph path, response byte count, SHA-256, and provenance-manifest path.
+
+Two files are written atomically:
+
+- `graph.json` — the graph-server response
+- `graph.json.manifest.json` — endpoint, non-secret request payload, response size, content type, and SHA-256
+
+Large graph responses are streamed to disk instead of being buffered in memory.
+
+## Generate and clean in one command
+
+```bash
+python main.py cleanup \
+  --prompt "The capital of France is" \
+  --raw-graph-output raw_graph.json \
+  --output cleaned_graph.json \
+  --strategy pathway \
+  --grouping functional
+```
+
+The command performs the API request first and only enters local graph cleanup after a valid JSON-shaped response is written.
+
+## Analyze or clean an existing graph
+
+```bash
+python main.py analyze --graph-file graph.json
+
 python main.py cleanup-existing \
-    --graph-file my_graph.json \
-    --strategy pathway \
-    --grouping functional \
-    --output cleaned_graph.json
+  --graph-file graph.json \
+  --strategy balanced \
+  --grouping functional \
+  --output cleaned_graph.json
 ```
 
-## Project Structure
+## Optional LLM labels
 
-```
-graph-analysis/
-├── main.py                      # CLI entry point
-├── config.yaml                  # Configuration settings
-├── requirements.txt             # Python dependencies
-├── neuronpedia_agent/
-│   ├── analysis/
-│   │   ├── graph_analyzer.py       # Graph structure analysis
-│   │   ├── node_selector.py        # Node selection strategies
-│   │   └── grouping_engine.py      # Supernode creation
-│   ├── labeling/
-│   │   └── auto_labeler.py         # LLM-based label generation
-│   └── optimization/
-│       ├── path_tracer.py          # Computational pathway tracing
-│       └── metrics.py              # Quality metrics
+Labeling is opt-in. Install the labeling requirements and set:
+
+```bash
+export ANTHROPIC_API_KEY=your_key
 ```
 
-## Features
+Then pass the key through the environment when running `cleanup` or `cleanup-existing`.
 
-### Node Selection Strategies
-- **Pathway**: Follow strongest computational paths from input to output
-- **Importance**: Select globally most important nodes
-- **Balanced**: Distribute selection across layers
+Labeling failures are not converted into plausible generic text. The command exits with an explicit error so an agent/controller can distinguish success from failure and decide whether to retry or continue without labels.
 
-### Grouping Strategies
-- **Functional**: Group by computational role (input detectors, processors, output promoters)
-- **Semantic**: Group by semantic similarity (requires embeddings)
-- **Layer**: Group by layer proximity
-- **Hybrid**: Combination of functional and semantic
+## Retry behavior
 
-### Quality Metrics
-- **Replacement Score**: Fraction of end-to-end influence through pinned features (target: >0.5)
-- **Completeness Score**: Fraction of incoming edge influence explained (target: >0.7)
+Graph generation can be expensive, so automatic POST retries are disabled by default. Use `--retries N` only when the caller explicitly wants retry behavior. Retryable statuses are limited to 429, 502, 503, and 504 plus transport failures.
 
-## Configuration
+## Current cleanup strategies
 
-Edit `config.yaml` to customize:
-- Node selection thresholds
-- Grouping parameters
-- LLM settings for labeling
-- Quality metric thresholds
+Node selection:
 
-## Requirements
+- `pathway`
+- `importance`
+- `balanced`
 
-- Python 3.8+
-- Anthropic API key (for automated labeling)
-- See `requirements.txt` for full dependencies
+Grouping:
 
-## Examples
+- `functional` — implemented
+- `semantic` — currently falls back to functional
+- `layer` — currently falls back to functional
+- `hybrid` — currently falls back to functional
 
-See the specification document for detailed examples and usage patterns.
+The fallback is documented rather than hidden so research output is not mistaken for a semantic clustering result.
 
-## License
+## Safety / failure semantics
 
-[License information to be added]
+The agent bridge follows fail-visible behavior:
+
+- HTTP failures raise an explicit `NeuronpediaAPIError`.
+- 2xx non-JSON graph responses are rejected.
+- Empty responses are rejected.
+- Raw graph files are atomically replaced only after a complete response is received.
+- LLM labeling failures are surfaced instead of silently returning fabricated fallback labels.
+- Authentication secrets are never included in provenance artifacts.
+
+This keeps safety checks without turning execution into a text-only simulation.
