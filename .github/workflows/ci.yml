@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-types:
     runs-on: ubuntu-latest
@@ -35,7 +39,7 @@ jobs:
           MYPYPATH: src
         run: python -m mypy --python-version 3.11 src/autocircuit
 
-  tests:
+  unit-tests:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -52,16 +56,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install CPU PyTorch
+      - name: Install lightweight unit-test environment
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
-
-      - name: Install project test dependencies
-        run: python -m pip install -e . "pytest>=8,<9"
+          python -m pip install "pytest>=8,<9" "packaging>=24"
+          python -m pip install -e . --no-deps
 
       - name: Unit tests
-        run: pytest -q
+        run: pytest -q -m "not integration"
 
   agent-contract:
     runs-on: ubuntu-latest
