@@ -55,3 +55,16 @@ def write_json_durable(path: Path, value: Any) -> None:
             pass
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def checkpoint(root: Path, state: dict[str, Any], path: Path) -> None:
+    """Record an artifact digest and publish the deterministic run manifest."""
+    relative = str(path.relative_to(root)).replace("\\", "/")
+    state["artifact_hashes"][relative] = sha256(path)
+    write_json(root / "run_manifest.json", state)
+
+
+def validate_checkpoints(root: Path, state: dict[str, Any]) -> None:
+    """Verify every artifact digest recorded in a resumable run manifest."""
+    for relative, digest in state.get("artifact_hashes", {}).items():
+        verify_resume(root / relative, str(digest))
