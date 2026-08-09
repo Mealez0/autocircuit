@@ -11,7 +11,7 @@ import click
 from neuronpedia_agent.analysis.graph_analyzer import GraphAnalyzer
 from neuronpedia_agent.analysis.grouping_engine import GroupingEngine
 from neuronpedia_agent.analysis.node_selector import NodeSelector
-from neuronpedia_agent.api import NeuronpediaAPIError, NeuronpediaGraphClient
+from neuronpedia_agent.api import GeneratedGraph, NeuronpediaAPIError, NeuronpediaGraphClient
 
 DEFAULT_MODEL = "google/gemma-2-2b"
 DEFAULT_API_URL = "http://localhost:5004"
@@ -126,7 +126,7 @@ def _make_client(
     )
 
 
-def _print_generation_result(generated: object) -> None:
+def _print_generation_result(generated: GeneratedGraph) -> None:
     click.echo(
         json.dumps(
             {
@@ -154,12 +154,7 @@ def _print_generation_result(generated: object) -> None:
     type=click.Choice(["pathway", "importance", "balanced"]),
 )
 @click.option("--max-nodes", default=30, show_default=True, type=int, help="Maximum nodes to pin")
-@click.option(
-    "--grouping",
-    default="functional",
-    show_default=True,
-    type=click.Choice(["functional", "semantic", "layer", "hybrid"]),
-)
+@click.option("--grouping", default="functional", show_default=True, type=click.Choice(["functional"]))
 @click.option("--api-url", envvar="NEURONPEDIA_GRAPH_URL", default=DEFAULT_API_URL, show_default=True)
 @click.option("--api-secret", envvar="NEURONPEDIA_GRAPH_SECRET", help="Graph server secret")
 @click.option("--auth-header", envvar="NEURONPEDIA_AUTH_HEADER", default="x-secret-key", show_default=True)
@@ -216,12 +211,7 @@ def cleanup(
     type=click.Choice(["pathway", "importance", "balanced"]),
 )
 @click.option("--max-nodes", default=30, show_default=True, type=int)
-@click.option(
-    "--grouping",
-    default="functional",
-    show_default=True,
-    type=click.Choice(["functional", "semantic", "layer", "hybrid"]),
-)
+@click.option("--grouping", default="functional", show_default=True, type=click.Choice(["functional"]))
 @click.option("--api-key", envvar="ANTHROPIC_API_KEY", help="Anthropic API key for optional labeling")
 def cleanup_existing(
     graph_file: str,
