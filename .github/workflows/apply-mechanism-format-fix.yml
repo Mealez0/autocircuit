@@ -1,0 +1,36 @@
+name: Apply mechanism formatting fix
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-mechanism-format-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+      - name: Apply exact formatting fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/autocircuit/mechanism_compile.py")
+          text = path.read_text(encoding="utf-8")
+          old = 'def _suppression_callback(recipe: InterventionRecipe) -> Callable[[torch.Tensor, Any], torch.Tensor]:\n'
+          new = '''def _suppression_callback(\n    recipe: InterventionRecipe,\n) -> Callable[[torch.Tensor, Any], torch.Tensor]:\n'''
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+      - name: Commit formatting fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/mechanism_compile.py
+          git commit -m "Fix mechanism compiler formatting"
+          git push origin HEAD:agent/ci-agent-hardening
