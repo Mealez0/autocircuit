@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import pytest
+
 from autocircuit.search_controller import SearchPolicy, build_search_plan, next_proposal
 
 
