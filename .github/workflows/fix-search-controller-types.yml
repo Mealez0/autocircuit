@@ -1,0 +1,47 @@
+name: Fix search controller types
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/fix-search-controller-types.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+
+      - name: Apply exact type fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/autocircuit/search_controller.py")
+          text = path.read_text(encoding="utf-8")
+          replacements = {
+              "from collections.abc import AbstractSet, Mapping, Sequence":
+                  "from collections.abc import Mapping, Sequence, Set",
+              "pair = tuple(sorted((left, right)))":
+                  "pair = (min(left, right), max(left, right))",
+              "completed_proposal_ids: AbstractSet[str]":
+                  "completed_proposal_ids: Set[str]",
+          }
+          for old, new in replacements.items():
+              assert text.count(old) == 1, f"expected exactly one occurrence of {old!r}"
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+
+      - name: Commit type fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/search_controller.py
+          git commit -m "Fix search controller typing contracts"
+          git push origin HEAD:agent/ci-agent-hardening
