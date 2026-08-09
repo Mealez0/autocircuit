@@ -49,6 +49,15 @@ def _integer(value: Any, label: str) -> int:
     return value
 
 
+def _optional_nonnegative_integer(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    result = _integer(value, label)
+    if result < 0:
+        raise ValueError(f"{label} must be non-negative")
+    return result
+
+
 def _variables(raw: Any) -> tuple[MechanismVariable, ...]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("serialized mechanism variables are malformed")
@@ -224,6 +233,12 @@ def _counterfactuals(raw_manifest: Mapping[str, Any]) -> tuple[CounterfactualPai
             changed_variables=tuple(changed),
             prompt_token_length=_integer(
                 raw.get("prompt_token_length"), "counterfactual prompt token length"
+            ),
+            base_query_fact_index=_optional_nonnegative_integer(
+                raw.get("base_query_fact_index"), "base query fact index"
+            ),
+            donor_query_fact_index=_optional_nonnegative_integer(
+                raw.get("donor_query_fact_index"), "donor query fact index"
             ),
             evidence_status=_string(raw.get("evidence_status"), "counterfactual evidence status"),
         )

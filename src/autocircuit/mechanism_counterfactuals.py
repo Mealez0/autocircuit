@@ -20,7 +20,7 @@ from autocircuit.datasets.validation import (
     validate_answer_tokens,
 )
 
-COUNTERFACTUAL_VERSION = "mechanism-counterfactuals-0.1.0"
+COUNTERFACTUAL_VERSION = "mechanism-counterfactuals-0.2.0"
 INTERPRETATION_SCOPE = "exploratory_discovery_only"
 KINDS = ("query_swap", "value_binding_swap")
 _EXPERIMENT_KINDS: dict[str, str | None] = {
@@ -50,6 +50,8 @@ class CounterfactualPair:
     donor_target_token_id: int
     changed_variables: tuple[str, ...]
     prompt_token_length: int
+    base_query_fact_index: int | None = None
+    donor_query_fact_index: int | None = None
     evidence_status: str = "proposal_only_not_evidence"
 
     def __post_init__(self) -> None:
@@ -86,6 +88,16 @@ class CounterfactualPair:
             or self.prompt_token_length <= 0
         ):
             raise ValueError("counterfactual prompt token length must be positive")
+        for label, index in (
+            ("base query fact index", self.base_query_fact_index),
+            ("donor query fact index", self.donor_query_fact_index),
+        ):
+            if index is not None and (
+                not isinstance(index, int) or isinstance(index, bool) or index < 0
+            ):
+                raise ValueError(f"{label} must be a non-negative integer when recorded")
+        if (self.base_query_fact_index is None) != (self.donor_query_fact_index is None):
+            raise ValueError("counterfactual fact-slot grounding must be recorded as a pair")
         if not self.changed_variables or len(self.changed_variables) != len(
             set(self.changed_variables)
         ):
@@ -155,7 +167,7 @@ def _render(
 
 def _validated_source(
     example: ExamplePair, tokenizer: Tokenizer
-) -> tuple[list[tuple[str, str]], str, str, str, int]:
+) -> tuple[list[tuple[str, str]], str, str, str, int, int]:
     if example.split != "discovery":
         raise ValueError("mechanism counterfactual generation accepts discovery examples only")
     assignments = _assignments(example)
@@ -168,9 +180,20 @@ def _validated_source(
     if reconstructed != example.clean_prompt:
         raise ValueError("source clean prompt does not match reconstructed discovery metadata")
 
-    matching = [value for entity, value in assignments if entity == query]
-    if len(matching) != 1 or matching[0] != example.target_text:
+    matching = [
+        (index, value)
+        for index, (entity, value) in enumerate(assignments)
+        if entity == query
+    ]
+    if len(matching) != 1 or matching[0][1] != example.target_text:
         raise ValueError("source discovery target disagrees with query assignment")
+    base_query_fact_index = example.metadata.get("query_fact_index")
+    if (
+        not isinstance(base_query_fact_index, int)
+        or isinstance(base_query_fact_index, bool)
+        or base_query_fact_index != matching[0][0]
+    ):
+        raise ValueError("source discovery query fact index disagrees with assignments")
     target_id, distractor_id = validate_answer_tokens(
         tokenizer, example.target_text, example.distractor_text
     )
@@ -184,7 +207,7 @@ def _validated_source(
         raise ValueError("source discovery prompt token length disagrees with metadata")
     if corrupt_length != base_length:
         raise ValueError("source discovery clean/corrupt prompt lengths differ")
-    return assignments, query, relation, stop, base_length
+    return assignments, query, relation, stop, base_length, base_query_fact_index
 
 
 def _counterfactual_id(
@@ -208,7 +231,9 @@ def _counterfactual_id(
     return f"mcf-{hashlib.sha256(payload).hexdigest()[:20]}"
 
 
-def _value_binding_pair(example: ExamplePair, prompt_length: int) -> CounterfactualPair:
+def _value_binding_pair(
+    example: ExamplePair, prompt_length: int, base_query_fact_index: int
+) -> CounterfactualPair:
     query = str(example.metadata["query_entity"])
     return CounterfactualPair(
         counterfactual_id=_counterfactual_id(
@@ -228,6 +253,8 @@ def _value_binding_pair(example: ExamplePair, prompt_length: int) -> Counterfact
         donor_target_token_id=example.distractor_token_id,
         changed_variables=("value_binding", "retrieved_value"),
         prompt_token_length=prompt_length,
+        base_query_fact_index=base_query_fact_index,
+        donor_query_fact_index=base_query_fact_index,
     )
 
 
@@ -239,14 +266,19 @@ def _query_swap_pair(
     relation: str,
     stop: str,
     prompt_length: int,
+    base_query_fact_index: int,
 ) -> tuple[CounterfactualPair | None, str | None]:
     separator = _separator(example)
     saw_length_match = False
     candidates = sorted(
-        ((entity, value) for entity, value in assignments if entity != base_query),
-        key=lambda item: (item[0], item[1]),
+        (
+            (index, entity, value)
+            for index, (entity, value) in enumerate(assignments)
+            if entity != base_query
+        ),
+        key=lambda item: (item[1], item[2], item[0]),
     )
-    for donor_query, donor_target in candidates:
+    for donor_query_fact_index, donor_query, donor_target in candidates:
         donor_prompt = _render(assignments, donor_query, relation, stop, separator)
         donor_length = len(tokenizer.encode(donor_prompt, add_special_tokens=False))
         if donor_length != prompt_length:
@@ -279,6 +311,8 @@ def _query_swap_pair(
                 donor_target_token_id=donor_id,
                 changed_variables=("query_key", "match_slot", "retrieved_value"),
                 prompt_token_length=prompt_length,
+                base_query_fact_index=base_query_fact_index,
+                donor_query_fact_index=donor_query_fact_index,
             ),
             None,
         )
@@ -304,7 +338,14 @@ def build_discovery_counterfactuals(
     pairs: list[CounterfactualPair] = []
     rejected: dict[str, int] = {}
     for example in sorted(examples, key=lambda item: item.example_id):
-        assignments, query, relation, stop, prompt_length = _validated_source(example, tokenizer)
+        (
+            assignments,
+            query,
+            relation,
+            stop,
+            prompt_length,
+            base_query_fact_index,
+        ) = _validated_source(example, tokenizer)
         query_pair, rejection = _query_swap_pair(
             example,
             tokenizer,
@@ -313,12 +354,15 @@ def build_discovery_counterfactuals(
             relation,
             stop,
             prompt_length,
+            base_query_fact_index,
         )
         if query_pair is not None:
             pairs.append(query_pair)
         elif rejection is not None:
             rejected[rejection] = rejected.get(rejection, 0) + 1
-        pairs.append(_value_binding_pair(example, prompt_length))
+        pairs.append(
+            _value_binding_pair(example, prompt_length, base_query_fact_index)
+        )
 
     ids = [pair.counterfactual_id for pair in pairs]
     if len(ids) != len(set(ids)):
