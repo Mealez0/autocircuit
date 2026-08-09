@@ -1,116 +1,113 @@
-"""Node selection module for choosing which nodes to pin"""
+"""Deterministic node selection for graph cleanup."""
 
-from typing import List
+from __future__ import annotations
+
 from .graph_analyzer import GraphAnalyzer
 
 
 class NodeSelector:
-    """Automatically select which nodes to pin based on importance and interpretability"""
+    """Select graph nodes to pin using deterministic heuristics."""
 
-    def __init__(self, analyzer: GraphAnalyzer, max_nodes: int = 30):
+    SUPPORTED_STRATEGIES = frozenset({"pathway", "importance", "balanced"})
+
+    def __init__(self, analyzer: GraphAnalyzer, max_nodes: int = 30) -> None:
+        if max_nodes <= 0:
+            raise ValueError("max_nodes must be positive")
         self.analyzer = analyzer
         self.max_nodes = max_nodes
 
-    def select_nodes_for_pinning(self, strategy: str = "pathway") -> List[str]:
-        """
-        Select nodes to pin using one of several strategies:
-
-        - "pathway": Follow strongest paths from input to output
-        - "importance": Select top-N most important nodes globally
-        - "balanced": Mix of input features, middle processing, output features
-
-        Returns: List of node IDs to pin
-        """
+    def select_nodes_for_pinning(self, strategy: str = "pathway") -> list[str]:
         if strategy == "pathway":
             return self._pathway_strategy()
-        elif strategy == "importance":
+        if strategy == "importance":
             return self._importance_strategy()
-        elif strategy == "balanced":
+        if strategy == "balanced":
             return self._balanced_strategy()
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
+        raise ValueError(f"Unknown strategy: {strategy}")
 
-    def _pathway_strategy(self) -> List[str]:
-        """
-        1. Identify top 3-5 target logits
-        2. Find input features in early layers
-        3. Trace strongest paths between them
-        4. Select nodes on these paths, prioritizing bottlenecks
-        """
-        # Get input and output features
+    @staticmethod
+    def _append_unique(destination: list[str], seen: set[str], node_ids: list[str], limit: int) -> bool:
+        """Append unseen IDs in encounter order; return True once the limit is reached."""
+        for node_id in node_ids:
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            destination.append(node_id)
+            if len(destination) >= limit:
+                return True
+        return False
+
+    def _pathway_strategy(self) -> list[str]:
+        """Select nodes from strongest paths while preserving deterministic path order."""
         input_features = self.analyzer.identify_input_features(layer_threshold=5)
         output_features = self.analyzer.identify_output_features(layer_threshold=16)
+        paths = self.analyzer.trace_pathways(input_features[:10], output_features[:10])
 
-        # Trace paths
-        paths = self.analyzer.trace_pathways(
-            input_features[:10],  # Sample top 10 input features
-            output_features[:10]   # Sample top 10 output features
-        )
-
-        # Collect nodes from strongest paths
-        selected_nodes = set()
+        selected: list[str] = []
+        seen: set[str] = set()
         for path in paths:
-            # Prioritize bottleneck nodes
-            selected_nodes.update(path.bottleneck_nodes)
-            # Add other nodes from path
-            selected_nodes.update(path.nodes)
-
-            if len(selected_nodes) >= self.max_nodes:
+            if self._append_unique(selected, seen, path.bottleneck_nodes, self.max_nodes):
                 break
+            if self._append_unique(selected, seen, path.nodes, self.max_nodes):
+                break
+        return selected
 
-        return list(selected_nodes)[:self.max_nodes]
-
-    def _importance_strategy(self) -> List[str]:
-        """Select top-N most important nodes globally"""
+    def _importance_strategy(self) -> list[str]:
         importance = self.analyzer.compute_node_importance()
-
-        # Sort by importance and take top N
         sorted_nodes = sorted(
             importance.items(),
-            key=lambda x: x[1],
-            reverse=True
+            key=lambda item: (-item[1], item[0]),
         )
+        return [node_id for node_id, _ in sorted_nodes[: self.max_nodes]]
 
-        return [node_id for node_id, _ in sorted_nodes[:self.max_nodes]]
-
-    def _balanced_strategy(self) -> List[str]:
-        """
-        Ensure representation across layers:
-        - 30% input features (layers 0-5)
-        - 40% middle processing (layers 6-15)
-        - 30% output features (layers 16+)
-        """
+    def _balanced_strategy(self) -> list[str]:
+        """Select an approximately 30/40/30 early/middle/late layer mixture."""
         importance = self.analyzer.compute_node_importance()
+        buckets: dict[str, list[tuple[str, float]]] = {
+            "input": [],
+            "middle": [],
+            "output": [],
+        }
 
-        # Categorize nodes by layer
-        input_nodes = []
-        middle_nodes = []
-        output_nodes = []
-
-        for node_id, imp_score in importance.items():
+        for node_id, score in importance.items():
             node = self.analyzer.get_node(node_id)
-            if node:
-                layer = node.get('layer', 0)
-                if layer <= 5:
-                    input_nodes.append((node_id, imp_score))
-                elif layer <= 15:
-                    middle_nodes.append((node_id, imp_score))
-                else:
-                    output_nodes.append((node_id, imp_score))
+            if not node:
+                continue
+            layer = int(node.get("layer", 0))
+            if layer <= 5:
+                buckets["input"].append((node_id, score))
+            elif layer <= 15:
+                buckets["middle"].append((node_id, score))
+            else:
+                buckets["output"].append((node_id, score))
 
-        # Sort each category by importance
-        input_nodes.sort(key=lambda x: x[1], reverse=True)
-        middle_nodes.sort(key=lambda x: x[1], reverse=True)
-        output_nodes.sort(key=lambda x: x[1], reverse=True)
+        for items in buckets.values():
+            items.sort(key=lambda item: (-item[1], item[0]))
 
-        # Select according to percentages
-        num_input = int(self.max_nodes * 0.30)
-        num_middle = int(self.max_nodes * 0.40)
-        num_output = int(self.max_nodes * 0.30)
+        quotas = {
+            "input": int(self.max_nodes * 0.30),
+            "middle": int(self.max_nodes * 0.40),
+            "output": int(self.max_nodes * 0.30),
+        }
+        selected: list[str] = []
+        seen: set[str] = set()
+        for bucket in ("input", "middle", "output"):
+            for node_id, _ in buckets[bucket][: quotas[bucket]]:
+                if node_id not in seen:
+                    selected.append(node_id)
+                    seen.add(node_id)
 
-        selected = []
-        selected.extend([node_id for node_id, _ in input_nodes[:num_input]])
-        selected.extend([node_id for node_id, _ in middle_nodes[:num_middle]])
-        selected.extend([node_id for node_id, _ in output_nodes[:num_output]])
+        # Integer quotas and sparse layer buckets can under-fill the requested
+        # budget. Fill the remainder from the strongest unselected nodes using a
+        # deterministic score/id ordering.
+        if len(selected) < self.max_nodes:
+            ranked = sorted(importance.items(), key=lambda item: (-item[1], item[0]))
+            for node_id, _ in ranked:
+                if node_id in seen:
+                    continue
+                selected.append(node_id)
+                seen.add(node_id)
+                if len(selected) >= self.max_nodes:
+                    break
 
         return selected
