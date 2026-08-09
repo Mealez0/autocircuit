@@ -20,12 +20,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from autocircuit import __version__
-from autocircuit.artifacts import (
-    sha256,
-    verify_resume,
-    write_json as _json,
-    write_json_durable as _validation_json,
-)
+from autocircuit.artifacts import sha256, verify_resume
+from autocircuit.artifacts import write_json as _json
+from autocircuit.artifacts import write_json_durable as _validation_json
 from autocircuit.baseline import (
     BaselineMetrics,
     ExampleResult,
