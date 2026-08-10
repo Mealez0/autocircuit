@@ -1,0 +1,67 @@
+name: Apply mechanism workflow fixes
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-mechanism-workflow-fixes.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+      - name: Apply exact workflow fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              assert text.count(old) == 1, f"patch drifted: {path}: {old[:120]!r}"
+              file.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          fit = "src/autocircuit/mechanism_fit.py"
+          replace_once(fit, "from autocircuit.dataset import read_jsonl\n", "")
+          replace_once(
+              fit,
+              '''def _read_object(path: Path, label: str) -> dict[str, Any]:\n    if not path.is_file():\n        raise RuntimeError(f"missing {label}: {path}")\n    value = json.loads(path.read_text(encoding="utf-8"))\n    if not isinstance(value, dict):\n        raise ValueError(f"{label} must be a JSON object")\n    return value\n\n\ndef _guard_mechanism_plan''',
+              '''def _read_object(path: Path, label: str) -> dict[str, Any]:\n    if not path.is_file():\n        raise RuntimeError(f"missing {label}: {path}")\n    value = json.loads(path.read_text(encoding="utf-8"))\n    if not isinstance(value, dict):\n        raise ValueError(f"{label} must be a JSON object")\n    return value\n\n\ndef _read_discovery_examples(path: Path) -> list[ExamplePair]:\n    if not path.is_file():\n        raise RuntimeError(f"missing matched discovery dataset: {path}")\n    examples: list[ExamplePair] = []\n    for line_number, line in enumerate(\n        path.read_text(encoding="utf-8").splitlines(), start=1\n    ):\n        if not line.strip():\n            continue\n        try:\n            value = json.loads(line)\n        except json.JSONDecodeError as exc:\n            raise ValueError(\n                f"malformed matched discovery JSONL at line {line_number}"\n            ) from exc\n        if not isinstance(value, dict):\n            raise ValueError(\n                f"matched discovery JSONL line {line_number} is not an object"\n            )\n        try:\n            example = ExamplePair(**value)\n        except (TypeError, ValueError) as exc:\n            raise ValueError(\n                f"invalid matched discovery example at line {line_number}"\n            ) from exc\n        if example.split != "discovery":\n            raise ValueError(\n                f"non-discovery example in matched dataset at line {line_number}"\n            )\n        examples.append(example)\n    if not examples:\n        raise ValueError("matched discovery dataset is empty")\n    return examples\n\n\ndef _guard_mechanism_plan''',
+          )
+          replace_once(
+              fit,
+              '''    examples = read_jsonl(matched_path)\n''',
+              '''    examples = _read_discovery_examples(matched_path)\n''',
+          )
+          replace_once(
+              fit,
+              '''    if not all(isinstance(value, str) and value for value in (model, load_revision, requested_revision)):\n''',
+              '''    if not all(\n        isinstance(value, str) and value\n        for value in (model, load_revision, requested_revision)\n    ):\n''',
+          )
+
+          replace_once(
+              "src/autocircuit/mechanism_partition.py",
+              '''    digest = hashlib.sha256(f"{namespace}:{family_id}".encode("utf-8")).hexdigest()\n''',
+              '''    digest = hashlib.sha256(f"{namespace}:{family_id}".encode()).hexdigest()\n''',
+          )
+
+          run = "src/autocircuit/mechanism_run.py"
+          replace_once(
+              run,
+              '''    if not isinstance(alignment_sources, dict) or "alignment_fit_counterfactuals" not in alignment_sources:\n        raise ValueError("alignment manifest is not grounded in alignment_fit counterfactuals")\n''',
+              '''    if (\n        not isinstance(alignment_sources, dict)\n        or "alignment_fit_counterfactuals" not in alignment_sources\n    ):\n        raise ValueError(\n            "alignment manifest is not grounded in alignment_fit counterfactuals"\n        )\n''',
+          )
+          PY
+          git diff --check
+      - name: Commit workflow fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/mechanism_fit.py src/autocircuit/mechanism_partition.py src/autocircuit/mechanism_run.py
+          git commit -m "Fix mechanism workflow loading and lint"
+          git push origin HEAD:agent/ci-agent-hardening
