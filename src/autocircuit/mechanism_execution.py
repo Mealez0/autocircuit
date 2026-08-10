@@ -258,6 +258,7 @@ class PreparedMechanismExperiment:
     input_mode: str
     counterfactual_kind: str | None
     counterfactuals: tuple[CounterfactualPair, ...]
+    slot_references: tuple[CounterfactualPair, ...] = ()
 
     def __post_init__(self) -> None:
         if self.input_mode not in {"base_donor", "base_only"}:
@@ -268,6 +269,24 @@ class PreparedMechanismExperiment:
             raise ValueError("base/donor execution requires a counterfactual kind")
         if self.input_mode == "base_only" and self.counterfactual_kind is not None:
             raise ValueError("base-only execution cannot require a donor kind")
+        if not self.slot_references:
+            if all(pair.kind == "query_swap" for pair in self.counterfactuals):
+                object.__setattr__(self, "slot_references", self.counterfactuals)
+            else:
+                raise ValueError(
+                    "prepared mechanism experiment requires query_swap slot references"
+                )
+        if len(self.slot_references) != len(self.counterfactuals):
+            raise ValueError("slot references must align one-to-one with experiment inputs")
+        for pair, reference in zip(
+            self.counterfactuals, self.slot_references, strict=True
+        ):
+            if reference.kind != "query_swap":
+                raise ValueError("slot reference must be a query_swap counterfactual")
+            if reference.source_example_id != pair.source_example_id:
+                raise ValueError("slot reference source example does not match experiment input")
+            if reference.base_prompt != pair.base_prompt:
+                raise ValueError("slot reference base prompt does not match experiment input")
 
     def to_manifest(self) -> dict[str, Any]:
         alignment_fingerprint = (
@@ -280,6 +299,9 @@ class PreparedMechanismExperiment:
             "input_mode": self.input_mode,
             "counterfactual_kind": self.counterfactual_kind,
             "counterfactual_ids": [pair.counterfactual_id for pair in self.counterfactuals],
+            "slot_reference_ids": [
+                pair.counterfactual_id for pair in self.slot_references
+            ],
             "hook_site": self.recipe.hook_site,
             "position_index": self.recipe.position_index,
             "selected_heads": list(self.recipe.selected_heads),
@@ -294,11 +316,19 @@ class PreparedMechanismExperiment:
         }
 
 
-def _base_only_inputs(pairs: Sequence[CounterfactualPair]) -> tuple[CounterfactualPair, ...]:
-    chosen: dict[str, CounterfactualPair] = {}
-    for pair in sorted(pairs, key=lambda item: (item.source_example_id, item.counterfactual_id)):
-        chosen.setdefault(pair.source_example_id, pair)
-    return tuple(chosen[key] for key in sorted(chosen))
+def _query_slot_references(
+    pairs: Sequence[CounterfactualPair],
+) -> dict[str, CounterfactualPair]:
+    references: dict[str, CounterfactualPair] = {}
+    for pair in sorted(pairs, key=lambda item: item.counterfactual_id):
+        if pair.kind != "query_swap":
+            continue
+        if pair.source_example_id in references:
+            raise ValueError(
+                "counterfactual manifest contains duplicate query_swap slot references"
+            )
+        references[pair.source_example_id] = pair
+    return references
 
 
 def prepare_execution_bundle(
@@ -324,14 +354,34 @@ def prepare_execution_bundle(
     alignments = load_alignment_manifest(alignment_manifest)
     recipe = compile_experiment(campaign, experiment_id, alignments)
     pairs = _counterfactuals(counterfactual_manifest)
+    query_references = _query_slot_references(pairs)
     kind = counterfactual_kind_for_experiment(experiment_id)
     if kind is None:
-        selected = _base_only_inputs(pairs)
+        if not query_references:
+            raise ValueError("counterfactual manifest contains no query_swap slot reference")
+        selected = tuple(query_references[key] for key in sorted(query_references))
+        slot_references = selected
         input_mode = "base_only"
     else:
         selected = tuple(pair for pair in pairs if pair.kind == kind)
         if not selected:
             raise ValueError(f"counterfactual manifest contains no required {kind} pairs")
+        if kind == "query_swap":
+            slot_references = selected
+        else:
+            missing = [
+                pair.source_example_id
+                for pair in selected
+                if pair.source_example_id not in query_references
+            ]
+            if missing:
+                raise ValueError(
+                    "counterfactual manifest is missing query_swap slot reference for "
+                    + ", ".join(sorted(missing))
+                )
+            slot_references = tuple(
+                query_references[pair.source_example_id] for pair in selected
+            )
         input_mode = "base_donor"
     return PreparedMechanismExperiment(
         experiment_id=experiment_id,
@@ -339,4 +389,5 @@ def prepare_execution_bundle(
         input_mode=input_mode,
         counterfactual_kind=kind,
         counterfactuals=selected,
+        slot_references=slot_references,
     )

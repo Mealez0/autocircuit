@@ -169,7 +169,10 @@ def test_value_interchange_uses_query_swap_only_as_alternative_slot_reference() 
     assert [pair.kind for pair in prepared.slot_references] == ["query_swap"]
     assert prepared.counterfactuals[0].donor_prompt == "value-donor-one"
     assert prepared.slot_references[0].donor_prompt == "alternative-slot-one"
-    assert prepared.counterfactuals[0].source_example_id == prepared.slot_references[0].source_example_id
+    assert (
+        prepared.counterfactuals[0].source_example_id
+        == prepared.slot_references[0].source_example_id
+    )
 
 
 def test_query_interchange_uses_its_own_query_swap_as_slot_reference() -> None:

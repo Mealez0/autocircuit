@@ -320,15 +320,20 @@ def run_prepared_experiment(
     measurements: list[dict[str, Any]] = []
     outcomes: list[str] = []
 
-    for pair in prepared.counterfactuals:
-        if pair.split != "discovery":
+    for pair, slot_reference in zip(
+        prepared.counterfactuals, prepared.slot_references, strict=True
+    ):
+        if pair.split != "discovery" or slot_reference.split != "discovery":
             raise ValueError("runtime mechanism execution accepts discovery inputs only")
         base = runtime.forward(pair.base_prompt, cache_sites=(downstream.hook_site,))
-        donor_sites = tuple(
-            sorted({downstream.hook_site, prepared.recipe.hook_site})
-        )
-        donor = runtime.forward(pair.donor_prompt, cache_sites=donor_sites)
+        donor: RuntimeForward | None = None
         if prepared.recipe.operation == "interchange_subspace":
+            donor_sites = (prepared.recipe.hook_site,)
+            if slot_reference.donor_prompt == pair.donor_prompt:
+                donor_sites = tuple(
+                    sorted({downstream.hook_site, prepared.recipe.hook_site})
+                )
+            donor = runtime.forward(pair.donor_prompt, cache_sites=donor_sites)
             try:
                 donor_activation = donor.cache[prepared.recipe.hook_site]
             except KeyError as exc:
@@ -336,6 +341,12 @@ def run_prepared_experiment(
             callback = build_hook_callback(prepared.recipe, donor_activation)
         else:
             callback = build_hook_callback(prepared.recipe)
+        if donor is not None and slot_reference.donor_prompt == pair.donor_prompt:
+            slot_reference_forward = donor
+        else:
+            slot_reference_forward = runtime.forward(
+                slot_reference.donor_prompt, cache_sites=(downstream.hook_site,)
+            )
         patched = runtime.forward(
             pair.base_prompt,
             cache_sites=(downstream.hook_site,),
@@ -343,7 +354,9 @@ def run_prepared_experiment(
         )
         try:
             base_slot = _projected_final(downstream, base.cache[downstream.hook_site])
-            donor_slot = _projected_final(downstream, donor.cache[downstream.hook_site])
+            donor_slot = _projected_final(
+                downstream, slot_reference_forward.cache[downstream.hook_site]
+            )
             patched_slot = _projected_final(downstream, patched.cache[downstream.hook_site])
         except KeyError as exc:
             raise RuntimeError("runtime omitted downstream slot-readout hook") from exc
