@@ -90,8 +90,13 @@ def execute_mechanism_artifacts(
     if counterfactual_manifest.get("analysis_role") != "mechanism_eval":
         raise ValueError("mechanism execution requires the mechanism_eval counterfactual manifest")
     alignment_sources = alignment_manifest.get("source_artifacts")
-    if not isinstance(alignment_sources, dict) or "alignment_fit_counterfactuals" not in alignment_sources:
-        raise ValueError("alignment manifest is not grounded in alignment_fit counterfactuals")
+    if (
+        not isinstance(alignment_sources, dict)
+        or "alignment_fit_counterfactuals" not in alignment_sources
+    ):
+        raise ValueError(
+            "alignment manifest is not grounded in alignment_fit counterfactuals"
+        )
     _verify_runtime_identity(runtime, alignment_manifest)
     alignments = load_alignment_manifest(alignment_manifest)
     prepared = prepare_execution_bundle(

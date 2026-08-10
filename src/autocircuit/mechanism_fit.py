@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from autocircuit.artifacts import sha256, write_json_durable
-from autocircuit.dataset import read_jsonl
 from autocircuit.datasets.associative_recall import ExamplePair
 from autocircuit.datasets.validation import Tokenizer
 from autocircuit.mechanism_artifacts import build_alignment_manifest
@@ -52,6 +51,41 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def _read_discovery_examples(path: Path) -> list[ExamplePair]:
+    if not path.is_file():
+        raise RuntimeError(f"missing matched discovery dataset: {path}")
+    examples: list[ExamplePair] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"malformed matched discovery JSONL at line {line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"matched discovery JSONL line {line_number} is not an object"
+            )
+        try:
+            example = ExamplePair(**value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid matched discovery example at line {line_number}"
+            ) from exc
+        if example.split != "discovery":
+            raise ValueError(
+                f"non-discovery example in matched dataset at line {line_number}"
+            )
+        examples.append(example)
+    if not examples:
+        raise ValueError("matched discovery dataset is empty")
+    return examples
 
 
 def _guard_mechanism_plan(value: Mapping[str, Any]) -> None:
@@ -263,12 +297,15 @@ def run_fit_cli(
 
     contract = _verify_frozen_discovery(discovery_root)
     matched_path = discovery_root / "matched_dataset.jsonl"
-    examples = read_jsonl(matched_path)
+    examples = _read_discovery_examples(matched_path)
     mechanism_plan = _read_object(mechanism_plan_path, "mechanism plan")
     model = contract.get("model")
     load_revision = contract.get("load_revision")
     requested_revision = contract.get("requested_revision")
-    if not all(isinstance(value, str) and value for value in (model, load_revision, requested_revision)):
+    if not all(
+        isinstance(value, str) and value
+        for value in (model, load_revision, requested_revision)
+    ):
         raise RuntimeError("frozen discovery model identity is incomplete")
     adapter = PythiaAdapter(model, load_revision, device)
     _verify_validation_adapter(adapter, contract)

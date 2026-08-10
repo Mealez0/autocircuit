@@ -41,7 +41,7 @@ class MechanismPartitionPolicy:
 
 
 def _family_order(family_id: str, namespace: str) -> tuple[str, str]:
-    digest = hashlib.sha256(f"{namespace}:{family_id}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{namespace}:{family_id}".encode()).hexdigest()
     return digest, family_id
 
 
