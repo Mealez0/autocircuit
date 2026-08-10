@@ -1,0 +1,77 @@
+name: Apply slot reference separation
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-slot-reference-separation.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+      - name: Apply exact slot-reference changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              assert text.count(old) == 1, f"patch drifted: {path}: {old[:120]!r}"
+              file.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          execution = "src/autocircuit/mechanism_execution.py"
+          replace_once(
+              execution,
+              '''    counterfactual_kind: str | None\n    counterfactuals: tuple[CounterfactualPair, ...]\n\n    def __post_init__(self) -> None:\n''',
+              '''    counterfactual_kind: str | None\n    counterfactuals: tuple[CounterfactualPair, ...]\n    slot_references: tuple[CounterfactualPair, ...] = ()\n\n    def __post_init__(self) -> None:\n''',
+          )
+          replace_once(
+              execution,
+              '''        if self.input_mode == "base_only" and self.counterfactual_kind is not None:\n            raise ValueError("base-only execution cannot require a donor kind")\n\n    def to_manifest(self) -> dict[str, Any]:\n''',
+              '''        if self.input_mode == "base_only" and self.counterfactual_kind is not None:\n            raise ValueError("base-only execution cannot require a donor kind")\n        if not self.slot_references:\n            if all(pair.kind == "query_swap" for pair in self.counterfactuals):\n                object.__setattr__(self, "slot_references", self.counterfactuals)\n            else:\n                raise ValueError(\n                    "prepared mechanism experiment requires query_swap slot references"\n                )\n        if len(self.slot_references) != len(self.counterfactuals):\n            raise ValueError("slot references must align one-to-one with experiment inputs")\n        for pair, reference in zip(\n            self.counterfactuals, self.slot_references, strict=True\n        ):\n            if reference.kind != "query_swap":\n                raise ValueError("slot reference must be a query_swap counterfactual")\n            if reference.source_example_id != pair.source_example_id:\n                raise ValueError("slot reference source example does not match experiment input")\n            if reference.base_prompt != pair.base_prompt:\n                raise ValueError("slot reference base prompt does not match experiment input")\n\n    def to_manifest(self) -> dict[str, Any]:\n''',
+          )
+          replace_once(
+              execution,
+              '''            "counterfactual_ids": [pair.counterfactual_id for pair in self.counterfactuals],\n            "hook_site": self.recipe.hook_site,\n''',
+              '''            "counterfactual_ids": [pair.counterfactual_id for pair in self.counterfactuals],\n            "slot_reference_ids": [\n                pair.counterfactual_id for pair in self.slot_references\n            ],\n            "hook_site": self.recipe.hook_site,\n''',
+          )
+          replace_once(
+              execution,
+              '''def _base_only_inputs(pairs: Sequence[CounterfactualPair]) -> tuple[CounterfactualPair, ...]:\n    chosen: dict[str, CounterfactualPair] = {}\n    for pair in sorted(pairs, key=lambda item: (item.source_example_id, item.counterfactual_id)):\n        chosen.setdefault(pair.source_example_id, pair)\n    return tuple(chosen[key] for key in sorted(chosen))\n''',
+              '''def _query_slot_references(\n    pairs: Sequence[CounterfactualPair],\n) -> dict[str, CounterfactualPair]:\n    references: dict[str, CounterfactualPair] = {}\n    for pair in sorted(pairs, key=lambda item: item.counterfactual_id):\n        if pair.kind != "query_swap":\n            continue\n        if pair.source_example_id in references:\n            raise ValueError(\n                "counterfactual manifest contains duplicate query_swap slot references"\n            )\n        references[pair.source_example_id] = pair\n    return references\n''',
+          )
+          replace_once(
+              execution,
+              '''    pairs = _counterfactuals(counterfactual_manifest)\n    kind = counterfactual_kind_for_experiment(experiment_id)\n    if kind is None:\n        selected = _base_only_inputs(pairs)\n        input_mode = "base_only"\n    else:\n        selected = tuple(pair for pair in pairs if pair.kind == kind)\n        if not selected:\n            raise ValueError(f"counterfactual manifest contains no required {kind} pairs")\n        input_mode = "base_donor"\n    return PreparedMechanismExperiment(\n        experiment_id=experiment_id,\n        recipe=recipe,\n        input_mode=input_mode,\n        counterfactual_kind=kind,\n        counterfactuals=selected,\n    )\n''',
+              '''    pairs = _counterfactuals(counterfactual_manifest)\n    query_references = _query_slot_references(pairs)\n    kind = counterfactual_kind_for_experiment(experiment_id)\n    if kind is None:\n        if not query_references:\n            raise ValueError("counterfactual manifest contains no query_swap slot reference")\n        selected = tuple(query_references[key] for key in sorted(query_references))\n        slot_references = selected\n        input_mode = "base_only"\n    else:\n        selected = tuple(pair for pair in pairs if pair.kind == kind)\n        if not selected:\n            raise ValueError(f"counterfactual manifest contains no required {kind} pairs")\n        if kind == "query_swap":\n            slot_references = selected\n        else:\n            missing = [\n                pair.source_example_id\n                for pair in selected\n                if pair.source_example_id not in query_references\n            ]\n            if missing:\n                raise ValueError(\n                    "counterfactual manifest is missing query_swap slot reference for "\n                    + ", ".join(sorted(missing))\n                )\n            slot_references = tuple(\n                query_references[pair.source_example_id] for pair in selected\n            )\n        input_mode = "base_donor"\n    return PreparedMechanismExperiment(\n        experiment_id=experiment_id,\n        recipe=recipe,\n        input_mode=input_mode,\n        counterfactual_kind=kind,\n        counterfactuals=selected,\n        slot_references=slot_references,\n    )\n''',
+          )
+
+          runtime = "src/autocircuit/mechanism_runtime.py"
+          replace_once(
+              runtime,
+              '''    for pair in prepared.counterfactuals:\n        if pair.split != "discovery":\n            raise ValueError("runtime mechanism execution accepts discovery inputs only")\n        base = runtime.forward(pair.base_prompt, cache_sites=(downstream.hook_site,))\n        donor_sites = tuple(\n            sorted({downstream.hook_site, prepared.recipe.hook_site})\n        )\n        donor = runtime.forward(pair.donor_prompt, cache_sites=donor_sites)\n        if prepared.recipe.operation == "interchange_subspace":\n            try:\n                donor_activation = donor.cache[prepared.recipe.hook_site]\n            except KeyError as exc:\n                raise RuntimeError("runtime omitted donor intervention hook") from exc\n            callback = build_hook_callback(prepared.recipe, donor_activation)\n        else:\n            callback = build_hook_callback(prepared.recipe)\n        patched = runtime.forward(\n            pair.base_prompt,\n            cache_sites=(downstream.hook_site,),\n            hooks=((prepared.recipe.hook_site, callback),),\n        )\n        try:\n            base_slot = _projected_final(downstream, base.cache[downstream.hook_site])\n            donor_slot = _projected_final(downstream, donor.cache[downstream.hook_site])\n            patched_slot = _projected_final(downstream, patched.cache[downstream.hook_site])\n        except KeyError as exc:\n            raise RuntimeError("runtime omitted downstream slot-readout hook") from exc\n''',
+              '''    for pair, slot_reference in zip(\n        prepared.counterfactuals, prepared.slot_references, strict=True\n    ):\n        if pair.split != "discovery" or slot_reference.split != "discovery":\n            raise ValueError("runtime mechanism execution accepts discovery inputs only")\n        base = runtime.forward(pair.base_prompt, cache_sites=(downstream.hook_site,))\n        donor: RuntimeForward | None = None\n        if prepared.recipe.operation == "interchange_subspace":\n            donor_sites = (prepared.recipe.hook_site,)\n            if slot_reference.donor_prompt == pair.donor_prompt:\n                donor_sites = tuple(\n                    sorted({downstream.hook_site, prepared.recipe.hook_site})\n                )\n            donor = runtime.forward(pair.donor_prompt, cache_sites=donor_sites)\n            try:\n                donor_activation = donor.cache[prepared.recipe.hook_site]\n            except KeyError as exc:\n                raise RuntimeError("runtime omitted donor intervention hook") from exc\n            callback = build_hook_callback(prepared.recipe, donor_activation)\n        else:\n            callback = build_hook_callback(prepared.recipe)\n        if donor is not None and slot_reference.donor_prompt == pair.donor_prompt:\n            slot_reference_forward = donor\n        else:\n            slot_reference_forward = runtime.forward(\n                slot_reference.donor_prompt, cache_sites=(downstream.hook_site,)\n            )\n        patched = runtime.forward(\n            pair.base_prompt,\n            cache_sites=(downstream.hook_site,),\n            hooks=((prepared.recipe.hook_site, callback),),\n        )\n        try:\n            base_slot = _projected_final(downstream, base.cache[downstream.hook_site])\n            donor_slot = _projected_final(\n                downstream, slot_reference_forward.cache[downstream.hook_site]\n            )\n            patched_slot = _projected_final(downstream, patched.cache[downstream.hook_site])\n        except KeyError as exc:\n            raise RuntimeError("runtime omitted downstream slot-readout hook") from exc\n''',
+          )
+
+          test = "tests/test_mechanism_slot_reference.py"
+          replace_once(
+              test,
+              '''    assert prepared.counterfactuals[0].source_example_id == prepared.slot_references[0].source_example_id\n''',
+              '''    assert (\n        prepared.counterfactuals[0].source_example_id\n        == prepared.slot_references[0].source_example_id\n    )\n''',
+          )
+          PY
+          git diff --check
+      - name: Commit slot-reference separation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/mechanism_execution.py src/autocircuit/mechanism_runtime.py tests/test_mechanism_slot_reference.py
+          git commit -m "Separate intervention donors from slot references"
+          git push origin HEAD:agent/ci-agent-hardening
