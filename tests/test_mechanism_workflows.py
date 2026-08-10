@@ -168,6 +168,10 @@ class FakeRuntime:
         raise AssertionError("workflow unit test should stub runtime execution")
 
 
+class FakeDiscoveryExample:
+    split = "discovery"
+
+
 def test_fit_workflow_publishes_disjoint_fit_and_eval_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,7 +198,7 @@ def test_fit_workflow_publishes_disjoint_fit_and_eval_artifacts(
         ),
     )
     output = tmp_path / "fit"
-    examples = [object(), object(), object(), object()]
+    examples = [FakeDiscoveryExample() for _ in range(4)]
 
     manifest = fit_discovery_artifacts(
         _mechanism_plan(),
