@@ -1,0 +1,49 @@
+name: Apply mechanism fit type narrowing
+
+on:
+  push:
+    branches: [agent/ci-agent-hardening]
+    paths: [.github/workflows/apply-fit-type-narrowing.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/ci-agent-hardening
+      - name: Apply exact type narrowing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/autocircuit/mechanism_fit.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    if not all(
+        isinstance(value, str) and value
+        for value in (model, load_revision, requested_revision)
+    ):
+        raise RuntimeError("frozen discovery model identity is incomplete")
+    adapter = PythiaAdapter(model, load_revision, device)
+'''
+          new = '''    if not isinstance(model, str) or not model:
+        raise RuntimeError("frozen discovery model id is incomplete")
+    if not isinstance(load_revision, str) or not load_revision:
+        raise RuntimeError("frozen discovery load revision is incomplete")
+    if not isinstance(requested_revision, str) or not requested_revision:
+        raise RuntimeError("frozen discovery requested revision is incomplete")
+    adapter = PythiaAdapter(model, load_revision, device)
+'''
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+      - name: Commit type narrowing
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/autocircuit/mechanism_fit.py
+          git commit -m "Narrow frozen discovery identity types"
+          git push origin HEAD:agent/ci-agent-hardening
