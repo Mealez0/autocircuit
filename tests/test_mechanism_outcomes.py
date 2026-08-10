@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from autocircuit.mechanism_outcomes import (
     ObservationPolicy,
     PairMechanismMeasurement,

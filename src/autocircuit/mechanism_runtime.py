@@ -171,7 +171,10 @@ def fit_runtime_alignments(
                     mlp = _final_position(forward.cache[mlp_site], rank=3)
                     downstream = _final_position(forward.cache[downstream_site], rank=3)
                 except KeyError as exc:
-                    raise RuntimeError(f"runtime omitted required fitting hook: {exc.args[0]}") from exc
+                    missing = str(exc.args[0])
+                    raise RuntimeError(
+                        f"runtime omitted required fitting hook: {missing}"
+                    ) from exc
                 if any(head >= int(z.shape[1]) for head in heads):
                     raise ValueError("candidate attention head is outside runtime hook_z shape")
                 selected = z[:, list(heads), :].reshape(1, -1)
@@ -188,7 +191,9 @@ def fit_runtime_alignments(
                 try:
                     mlp = _final_position(forward.cache[mlp_site], rank=3)
                 except KeyError as exc:
-                    raise RuntimeError(f"runtime omitted required fitting hook: {mlp_site}") from exc
+                    raise RuntimeError(
+                        f"runtime omitted required fitting hook: {mlp_site}"
+                    ) from exc
                 mlp_value_samples.append(mlp)
                 value_labels.append(f"token_{token_id}")
         else:
