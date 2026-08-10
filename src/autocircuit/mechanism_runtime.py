@@ -328,7 +328,7 @@ def run_prepared_experiment(
         base = runtime.forward(pair.base_prompt, cache_sites=(downstream.hook_site,))
         donor: RuntimeForward | None = None
         if prepared.recipe.operation == "interchange_subspace":
-            donor_sites = (prepared.recipe.hook_site,)
+            donor_sites: tuple[str, ...] = (prepared.recipe.hook_site,)
             if slot_reference.donor_prompt == pair.donor_prompt:
                 donor_sites = tuple(
                     sorted({downstream.hook_site, prepared.recipe.hook_site})

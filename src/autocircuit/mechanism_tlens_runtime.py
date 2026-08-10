@@ -60,7 +60,6 @@ class TransformerLensMechanismRuntime:
         if any(not isinstance(site, str) or not site for site, _ in hooks):
             raise ValueError("mechanism runtime hook sites must be non-empty strings")
 
-    @torch.inference_mode()
     def forward(
         self,
         prompt: str,
@@ -106,11 +105,12 @@ class TransformerLensMechanismRuntime:
 
             combined_hooks.append((site, composed))
 
-        logits = self.model.run_with_hooks(
-            prompt,
-            fwd_hooks=combined_hooks,
-            return_type="logits",
-        )
+        with torch.inference_mode():
+            logits = self.model.run_with_hooks(
+                prompt,
+                fwd_hooks=combined_hooks,
+                return_type="logits",
+            )
         if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
             raise RuntimeError(
                 "TransformerLens mechanism runtime expected logits shape [batch, position, vocab]"
