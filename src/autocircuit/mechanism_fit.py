@@ -302,11 +302,12 @@ def run_fit_cli(
     model = contract.get("model")
     load_revision = contract.get("load_revision")
     requested_revision = contract.get("requested_revision")
-    if not all(
-        isinstance(value, str) and value
-        for value in (model, load_revision, requested_revision)
-    ):
-        raise RuntimeError("frozen discovery model identity is incomplete")
+    if not isinstance(model, str) or not model:
+        raise RuntimeError("frozen discovery model id is incomplete")
+    if not isinstance(load_revision, str) or not load_revision:
+        raise RuntimeError("frozen discovery load revision is incomplete")
+    if not isinstance(requested_revision, str) or not requested_revision:
+        raise RuntimeError("frozen discovery requested revision is incomplete")
     adapter = PythiaAdapter(model, load_revision, device)
     _verify_validation_adapter(adapter, contract)
     runtime = TransformerLensMechanismRuntime(adapter)
